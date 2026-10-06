@@ -1,0 +1,28 @@
+name: 项目检查
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Node.js 22 验证
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 获取源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 配置 Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: 安装依赖
+        run: npm ci --ignore-scripts
+      - name: 检查格式、类型、测试与构建
+        run: npm run verify
