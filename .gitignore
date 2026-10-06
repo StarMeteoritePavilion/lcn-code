@@ -71,8 +71,8 @@ web_modules/
 .env.*
 !.env.example
 
-# 本地配置，使用 setting.example.json 创建
-/setting.json
+# 本地配置，使用 settings.example.json 创建
+/settings.json
 # 保留旧配置的忽略规则，避免泄露迁移前的本地值
 /config.toml
 

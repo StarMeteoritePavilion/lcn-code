@@ -1,0 +1,91 @@
+{
+  "provider": "lcn29",
+  "model": "gemini-3.8-flash-high",
+  "modelProviders": [
+    {
+      "name": "lcn29",
+      "api": "anthropic-messages",
+      "baseUrl": "${BASE_URL}",
+      "apiKey": "${API_KEY}",
+      "models": [
+        {
+          "id": "gemini-3.8-flash-high",
+          "input": ["text", "image"],
+          "name": "gemini-3.8-flash-high",
+          "reasoning": false,
+          "contextWindow": 128000,
+          "maxTokens": 16384,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "tiers": []
+          },
+          "compat": {
+            "supportsEagerToolInputStreaming": true,
+            "supportsLongCacheRetention": true,
+            "supportsCacheControlOnTools": true,
+            "supportsTemperature": true,
+            "forceAdaptiveThinking": false,
+            "allowEmptySignature": false,
+            "supportsStrictTools": false,
+            "supportsMidConvoEffort": false,
+            "supportsMidConvoSystemMessages": false,
+            "supportsMidConvoToolChanges": false
+          },
+          "inputLimits": {
+            "maxRequestBytes": 20971520,
+            "images": {
+              "resize": {
+                "maxWidth": 2000,
+                "maxHeight": 2000,
+                "maxBytes": 4718592,
+                "jpegQuality": 80
+              },
+              "maxPerMessage": 8,
+              "maxPerRequest": 16
+            }
+          },
+          "promptCache": {
+            "short": 300,
+            "long": 86400
+          },
+          "headers": {},
+          "thinkingLevelMap": {
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": null,
+            "max": null
+          },
+          "requestOptions": {}
+        }
+      ],
+      "requestOptions": {
+        "env": {},
+        "headers": {},
+        "timeoutMs": 600000,
+        "maxRetries": 0,
+        "maxRetryDelayMs": 60000,
+        "temperature": 0.7,
+        "maxTokens": 16384,
+        "cacheRetention": "short",
+        "sessionId": "lcn-code-demo",
+        "toolChoice": "auto",
+        "reasoning": "low",
+        "thinkingEnabled": false,
+        "thinkingBudgetTokens": 1024,
+        "thinkingDisplay": "summarized",
+        "interleavedThinking": true,
+        "thinkingBudgets": {
+          "minimal": 1024,
+          "low": 2048,
+          "medium": 8192,
+          "high": 16384
+        }
+      }
+    }
+  ]
+}
