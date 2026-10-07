@@ -1,6 +1,6 @@
 import { loadConfig } from "./config.ts";
 import { validateAiConfig, type AiConfig, type AiRequestOptions } from "./ai-config-schema.ts";
-import type { Model } from "../ai/types.ts";
+import type { Model } from "../llm-api/types.ts";
 
 /** 配置读取后选中的运行时模型与请求选项。 */
 export interface ResolvedAiConfig {

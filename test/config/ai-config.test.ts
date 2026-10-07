@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { loadAiConfig } from "../../src/config/index.ts";
 import type { AiRequestOptions } from "../../src/config/ai-config-schema.ts";
-import type { Api } from "../../src/ai/types.ts";
+import type { Api } from "../../src/llm-api/types.ts";
 
 function createConfig(api: Api = "openai-completions"): Record<string, unknown> {
   return {

@@ -218,4 +218,4 @@ Pi 先读取 options.env 中的非空 PI_CACHE_RETENTION，再读取 process.env
 
 会话内容与默认配置分开提供。模型、请求和兼容配置需要在使用边界验证；参数类型或字段文档不能验证实际端点支持情况。
 
-默认值来源：Pi 的 `packages/coding-agent/src/core/provider-composer.ts`（modelFromJson）、`packages/ai/src/api/anthropic-messages.ts`、`packages/ai/src/api/simple-options.ts`、`packages/ai/src/types.ts`、`packages/ai/src/utils/provider-retry.ts`、`packages/ai/src/utils/provider-env.ts` 和当前安装的 `node_modules/@anthropic-ai/sdk/src/client.ts`。字段声明：`src/ai/types.ts` 和对应的 `src/ai/api/anthropic-messages.ts`。已实现配置加载与运行时校验；未进行真实模型调用。
+默认值来源：Pi 的 `packages/coding-agent/src/core/provider-composer.ts`（modelFromJson）、`packages/ai/src/api/anthropic-messages.ts`、`packages/ai/src/api/simple-options.ts`、`packages/ai/src/types.ts`、`packages/ai/src/utils/provider-retry.ts`、`packages/ai/src/utils/provider-env.ts` 和当前安装的 `node_modules/@anthropic-ai/sdk/src/client.ts`。字段声明：`src/llm-api/types.ts` 和对应的 `src/llm-api/api/anthropic-messages.ts`。已实现配置加载与运行时校验；未进行真实模型调用。

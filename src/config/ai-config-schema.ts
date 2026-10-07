@@ -1,7 +1,7 @@
 import { type Static, type TSchema, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
-import type { ApiStreamOptions, SimpleStreamOptions } from "../ai/types.ts";
+import type { ApiStreamOptions, SimpleStreamOptions } from "../llm-api/types.ts";
 
 const STRING = Type.String();
 const NONEMPTY_STRING = Type.String({ minLength: 1 });

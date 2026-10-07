@@ -52,7 +52,7 @@ node dist/main.js
 ```
 lcn-code/
 ├── src/               # 源码目录
-│   ├── ai/           # 三协议适配器、消息与工具、模型目录和通用工具
+│   ├── llm-api/      # 三协议适配器、消息与工具、模型目录和通用工具
 │   ├── config/       # 配置读取、环境替换和 AI 配置校验
 │   └── main.ts       # 协议演示入口
 ├── test/              # 与 src 对应的 Node.js 内置测试

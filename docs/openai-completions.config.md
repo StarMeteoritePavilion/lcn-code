@@ -297,4 +297,4 @@ timeoutMs 使用已核实的 SDK 默认值；temperature、sessionId 和模型�
 
 会话内容与默认配置分开提供。模型、请求和兼容配置需要在使用边界验证；参数类型或字段文档不能验证实际端点支持情况。
 
-默认值来源：Pi 的 `packages/coding-agent/src/core/provider-composer.ts`（modelFromJson）、`packages/ai/src/api/openai-completions.ts`、`packages/ai/src/api/simple-options.ts`、`packages/ai/src/models.ts`、`packages/ai/src/utils/provider-retry.ts`、`packages/ai/src/utils/provider-env.ts` 和 `node_modules/openai/src/client.ts`。字段声明：当前项目的 `src/ai/types.ts` 和 `src/ai/api/openai-completions.ts`。已实现配置加载与运行时校验；本次只核对源码与文档，未进行真实模型调用。
+默认值来源：Pi 的 `packages/coding-agent/src/core/provider-composer.ts`（modelFromJson）、`packages/ai/src/api/openai-completions.ts`、`packages/ai/src/api/simple-options.ts`、`packages/ai/src/models.ts`、`packages/ai/src/utils/provider-retry.ts`、`packages/ai/src/utils/provider-env.ts` 和 `node_modules/openai/src/client.ts`。字段声明：当前项目的 `src/llm-api/types.ts` 和 `src/llm-api/api/openai-completions.ts`。已实现配置加载与运行时校验；本次只核对源码与文档，未进行真实模型调用。

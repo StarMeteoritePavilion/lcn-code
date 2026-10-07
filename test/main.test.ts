@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
 import { main } from "../src/main.ts";
-import type { Api, FetchFunction } from "../src/ai/index.ts";
+import type { Api, FetchFunction } from "../src/llm-api/index.ts";
 
 interface RequestTool {
   type?: string;

@@ -1,7 +1,7 @@
 import { deepStrictEqual, doesNotThrow, match, throws } from "node:assert";
 import { describe, it } from "node:test";
 import { validateAiConfig } from "../../src/config/ai-config-schema.ts";
-import type { Api } from "../../src/ai/types.ts";
+import type { Api } from "../../src/llm-api/types.ts";
 
 const COMMON_REQUEST = {
   apiKey: "请求密钥由加载器覆盖",

@@ -25,13 +25,13 @@ import {
   type Tool,
   type ToolCall,
   type ToolResultMessage,
-} from "./ai/index.ts";
+} from "./llm-api/index.ts";
 import { loadAiConfig, type ResolvedAiConfig } from "./config/index.ts";
 import {
   adjustMaxTokensForThinking,
   clampMaxTokensToContext,
   clampThinkingBudgetToAnswerRoom,
-} from "./ai/api/simple-options.ts";
+} from "./llm-api/api/simple-options.ts";
 
 const MAX_TOOL_ROUNDS = 4;
 const METHODS = ["stream", "complete", "streamSimple", "completeSimple"] as const;
