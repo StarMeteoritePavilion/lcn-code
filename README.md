@@ -94,7 +94,6 @@ npm run test:coverage
 
 ## 接口与配置文档
 
-- [AI 模块公共接口与调用约定](docs/ai.md)
 - [Anthropic Messages 配置](docs/anthropic-messages.config.md)
 - [OpenAI Completions 配置](docs/openai-completions.config.md)
 - [OpenAI Responses 配置](docs/openai-responses.config.md)
