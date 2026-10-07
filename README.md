@@ -42,7 +42,7 @@ npm run build
 npm test
 
 # 在 .env 填写 BASE_URL、API_KEY，并准备 JPEG 格式的 docs/logo.jpg
-# 运行所选协议的全部适用场景；会发起多次真实模型请求
+# 运行当前模型的 agent-loop 场景；会发起多次真实模型请求
 # provider、model 必须精确匹配 settings.json 中的提供商名称和模型 ID
 node dist/main.js
 ```
@@ -53,8 +53,9 @@ node dist/main.js
 lcn-code/
 ├── src/               # 源码目录
 │   ├── llm-api/      # 三协议适配器、消息与工具、模型目录和通用工具
+│   ├── agent-loop/   # 代理循环及工具调度
 │   ├── config/       # 配置读取、环境替换和 AI 配置校验
-│   └── main.ts       # 协议演示入口
+│   └── main.ts       # 代理循环演示入口
 ├── test/              # 与 src 对应的 Node.js 内置测试
 ├── scripts/           # 构建辅助及源码规范检查脚本
 ├── docs/              # AI 接口及三协议配置文档、演示图片
@@ -79,7 +80,15 @@ lcn-code/
 
 ## 运行与验证
 
-`node dist/main.js` 根据 `settings.json` 选中的模型协议运行演示，不会依次调用三个协议。每个适用场景分别使用 `stream`、`complete`、`streamSimple`、`completeSimple` 四种入口；图片、思考、严格工具与语法工具场景根据配置能力执行或跳过。演示读取 JPEG 格式的 `docs/logo.jpg`，即使模型不支持图片也需要该文件。结束时输出成功、失败、跳过数量及原生事件数量；场景失败时退出码为 1，按 Ctrl+C 中断请求。
+`node dist/main.js` 使用 `settings.json` 选中的模型运行当前 agent-loop 功能，不再运行原来的四种模型接口演示。场景覆盖提示与继续入口、生命周期事件、串行和并行工具、工具强制串行、参数准备、部分结果、调用前后钩子、嵌套调用、错误恢复、批次终止、请求准备与上下文转换、轮次调度、steering、follow-up、工具动态替换和响应中取消。
+
+`main` 显式调用各场景的方法，例如 `demoEntryAndContinue`、`demoParallelTools`、`demoToolHooksAndNested`；每个方法独立设置对应钩子并验证结果。共用部分负责请求适配、内存工具、事件记录和统计。
+
+每个场景最多四次模型请求、限时六十秒且不自动重试。演示断言实际工具调用与事件；例如模型没有在同一响应中返回两个调用时，并行验证会失败。图片和推理按配置声明执行；仅声明图片输入能力时读取 JPEG 格式的 `docs/logo.jpg`。工具只在内存中计算，结束时输出成功、失败和跳过数量；场景失败时退出码为 1，按 Ctrl+C 中断整个演示。
+
+推理场景优先使用模型声明支持的 `high`，发送需要计算的问题；响应包含思考块或正数推理用量才算通过，避免把不公开思考内容的响应误判为失败。
+
+输出截断、非法参数和未知工具等难以稳定由真实模型触发的边界由离线测试验证，不作为真实演示的通过场景。
 
 提交前运行 `npm run verify`，检查格式与源码规范、编译并运行离线测试、构建源码；该命令不运行真实模型演示。测试编译产物位于 `.build/test`，构建产物位于 `dist`，对应脚本会先清理各自产物目录。
 
@@ -98,7 +107,7 @@ npm run test:coverage
 - [OpenAI Completions 配置](docs/openai-completions.config.md)
 - [OpenAI Responses 配置](docs/openai-responses.config.md)
 
-配置加载不发现内建模型，也不按名称推断能力。`settings.example.json` 的提供商、模型与兼容参数需要按实际端点配置。示例中的 `inputLimits`、`promptCache` 当前只进行结构校验并保留到模型对象，不执行图片缩放、请求大小/图片数量限制，也不改变协议缓存 TTL；详情见 AI 接口文档。
+配置加载不发现内建模型，也不按名称推断能力。`settings.example.json` 的提供商、模型与兼容参数需要按实际端点配置。示例中的 `inputLimits`、`promptCache` 当前只进行结构校验并保留到模型对象，不执行图片缩放、请求大小/图片数量限制，也不改变协议缓存 TTL；详情见三个协议配置文档。
 
 ## 致谢
 
