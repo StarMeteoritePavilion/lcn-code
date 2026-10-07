@@ -1,4 +1,5 @@
 import { strictEqual, rejects } from "node:assert";
+import { getEventListeners } from "node:events";
 import { describe, it } from "node:test";
 import { retryRequest } from "../../../src/llm-api/utils/request-retry.ts";
 
@@ -108,5 +109,152 @@ describe("retryRequest", (): void => {
     queueMicrotask((): void => controller.abort());
     await rejects(promise, { name: "AbortError" });
     strictEqual(calls, 1);
+  });
+});
+
+describe("retryRequest 延迟与取消边界", (): void => {
+  it("HTTP日期及无效毫秒头回退秒头，零上限不限制服务端延迟", async (): Promise<void> => {
+    const cases = [
+      {
+        headers: new Headers({ "retry-after": "Thu, 01 Jan 1970 00:00:00 GMT" }),
+        maxRetryDelayMs: undefined,
+      },
+      {
+        headers: new Headers({ "retry-after-ms": "invalid", "retry-after": "0" }),
+        maxRetryDelayMs: 0,
+      },
+    ];
+    for (const item of cases) {
+      let calls = 0;
+      const result = await retryRequest(
+        async (): Promise<number> => {
+          calls++;
+          if (calls === 1) {
+            throw Object.assign(new Error("暂时失败"), { status: 503, headers: item.headers });
+          }
+          return calls;
+        },
+        { maxRetries: 1, maxRetryDelayMs: item.maxRetryDelayMs },
+      );
+      strictEqual(result, 2);
+    }
+  });
+  it("缺少响应头或非法延迟头采用指数退避，耗尽后保留最后异常", async (): Promise<void> => {
+    for (const headers of [
+      undefined,
+      new Headers({ "retry-after-ms": "Infinity", "retry-after": "invalid" }),
+    ]) {
+      const error = Object.assign(new Error("持续失败"), { status: undefined, headers });
+      let calls = 0;
+      await rejects(
+        retryRequest(
+          async (): Promise<void> => {
+            calls++;
+            throw error;
+          },
+          { maxRetries: 1 },
+        ),
+        (value: unknown): boolean => value === error,
+      );
+      strictEqual(calls, 2);
+    }
+  });
+  it("错误字段类型及非Error值不进入重试", async (): Promise<void> => {
+    for (const error of [
+      "失败",
+      Object.assign(new Error("状态错误"), { status: "503", headers: undefined }),
+      Object.assign(new Error("头错误"), { status: 503, headers: {} }),
+    ]) {
+      let calls = 0;
+      await rejects(
+        retryRequest(
+          async (): Promise<void> => {
+            calls++;
+            throw error;
+          },
+          { maxRetries: 1 },
+        ),
+        (value: unknown): boolean => value === error,
+      );
+      strictEqual(calls, 1);
+    }
+  });
+  it("已中断的请求失败与已注册的退避取消都返回AbortError", async (): Promise<void> => {
+    const controller = new AbortController();
+    let calls = 0;
+    const running = retryRequest(
+      async (): Promise<void> => {
+        calls++;
+        setImmediate((): void => controller.abort());
+        throw Object.assign(new Error("暂时失败"), {
+          status: 503,
+          headers: new Headers({ "retry-after-ms": "1000" }),
+        });
+      },
+      { maxRetries: 1, signal: controller.signal },
+    );
+    await rejects(running, { name: "AbortError" });
+    strictEqual(calls, 1);
+    await rejects(
+      retryRequest(
+        async (): Promise<void> => {
+          throw new Error("调用失败");
+        },
+        { signal: AbortSignal.abort() },
+      ),
+      { name: "AbortError" },
+    );
+  });
+});
+
+describe("retryRequest 元数据读取期间的取消", (): void => {
+  it("延迟响应头读取时取消，退避不会注册新的等待", async (): Promise<void> => {
+    const controller = new AbortController();
+    class AbortHeaders extends Headers {
+      /**
+       * 在读取服务端延迟时取消当前请求。
+       * @param name - 请求头名称。
+       * @returns 读取到的原始请求头值。
+       */
+      override get(name: string): string | null {
+        if (name === "retry-after-ms") {
+          controller.abort();
+        }
+        return super.get(name);
+      }
+    }
+    const headers = new AbortHeaders({ "retry-after-ms": "0" });
+    let calls = 0;
+    await rejects(
+      retryRequest(
+        async (): Promise<void> => {
+          calls++;
+          throw Object.assign(new Error("暂时失败"), { status: 503, headers });
+        },
+        { maxRetries: 1, signal: controller.signal },
+      ),
+      { name: "AbortError" },
+    );
+    strictEqual(calls, 1);
+    strictEqual(getEventListeners(controller.signal, "abort").length, 0);
+  });
+  it("有信号的正常重试完成后移除退避取消监听器", async (): Promise<void> => {
+    const controller = new AbortController();
+    let calls = 0;
+    const result = await retryRequest(
+      async (): Promise<string> => {
+        calls++;
+        if (calls === 1) {
+          throw Object.assign(new Error("暂时失败"), {
+            status: 503,
+            headers: new Headers({ "retry-after-ms": "0" }),
+          });
+        }
+        return "完成";
+      },
+      { maxRetries: 1, signal: controller.signal },
+    );
+    strictEqual(result, "完成");
+    strictEqual(getEventListeners(controller.signal, "abort").length, 0);
   });
 });

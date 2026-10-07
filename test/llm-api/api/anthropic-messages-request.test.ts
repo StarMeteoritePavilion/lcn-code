@@ -8,6 +8,8 @@ import {
 } from "../../../src/llm-api/api/anthropic-messages-request.ts";
 import { normalizeContext } from "../../../src/llm-api/utils/transcript.ts";
 import { testModel } from "../fixtures.ts";
+import { assistant } from "../helpers.ts";
+import type { Tool } from "../../../src/llm-api/types.ts";
 
 describe("getAnthropicCompat", (): void => {
   it("读取显式能力并为其他能力填充原默认值", (): void => {
@@ -174,5 +176,117 @@ describe("buildParams", (): void => {
       (): unknown => buildParams(testModel("anthropic-messages"), context),
       /strict tools are unsupported/,
     );
+  });
+});
+
+describe("Anthropic 严格工具与历史 effort", (): void => {
+  it("严格 schema 拒绝数值约束及不支持格式，允许最小数组与日期格式", (): void => {
+    const model = { ...testModel("anthropic-messages"), compat: { supportsStrictTools: true } };
+    for (const property of [
+      { type: "number", minimum: 0 },
+      { type: "array", items: { type: "string" }, minItems: 2 },
+      { type: "string", format: "unsupported" },
+    ]) {
+      const context = normalizeContext({
+        messages: [],
+        tools: [
+          {
+            name: "echo",
+            description: "回显",
+            parameters: {
+              type: "object",
+              properties: { value: property },
+              required: ["value"],
+            } as Tool["parameters"],
+            constrainedSampling: { type: "json_schema", strict: "require" },
+          },
+        ],
+      });
+      throws((): void => {
+        buildParams(model, context, { apiKey: "test-key" });
+      }, /requires JSON-schema/);
+    }
+    const context = normalizeContext({
+      messages: [],
+      tools: [
+        {
+          name: "echo",
+          description: "回显",
+          parameters: Type.Object({
+            dates: Type.Array(Type.String({ format: "date" }), { minItems: 1 }),
+          }),
+          constrainedSampling: { type: "json_schema", strict: "require" },
+        },
+      ],
+    });
+    const output = buildParams(model, context, { apiKey: "test-key" });
+    const declaredTool = output.tools?.[0];
+    strictEqual(declaredTool && "strict" in declaredTool ? declaredTool.strict : undefined, true);
+  });
+  it("同模型历史 effort 放在助手前且当前 effort 放在末尾", (): void => {
+    const model = { ...testModel("anthropic-messages"), compat: { supportsMidConvoEffort: true } };
+    const history = assistant({ api: model.api, model: model.id, thinkingEffort: "medium" });
+    const context = normalizeContext({ messages: [history] });
+    const output = buildParams(model, context, { apiKey: "test-key", effort: "low" });
+    deepStrictEqual(output.messages, [
+      { role: "system", content: [], output_config: { effort: "medium" } },
+      { role: "assistant", content: [{ type: "text", text: "回答" }] },
+      { role: "system", content: [], output_config: { effort: "low" } },
+    ]);
+  });
+});
+
+describe("Anthropic 请求内容与关闭思考边界", (): void => {
+  it("非思考请求保留温度，显式关闭推理按模型关闭能力发送", (): void => {
+    for (const off of [undefined, null]) {
+      const model = {
+        ...testModel("anthropic-messages"),
+        reasoning: true,
+        thinkingLevelMap: { off },
+      };
+      const result = buildParams(model, normalizeContext({ messages: [] }), {
+        apiKey: "test-key",
+        thinkingEnabled: false,
+        temperature: 0,
+      });
+      strictEqual(result.temperature, 0);
+      deepStrictEqual(result.thinking, off === null ? undefined : { type: "disabled" });
+    }
+  });
+  it("空白助手被忽略，混合工具图片结果保留原文本与图片", (): void => {
+    const model = testModel("anthropic-messages");
+    const context = normalizeContext({
+      messages: [
+        assistant({ api: model.api, model: model.id, content: [{ type: "text", text: " " }] }),
+        {
+          role: "toolResult",
+          toolCallId: "call",
+          toolName: "echo",
+          content: [
+            { type: "text", text: "说明" },
+            { type: "image", mimeType: "image/png", data: "AQ==" },
+          ],
+          isError: false,
+          timestamp: 1,
+        },
+      ],
+    });
+    const result = buildParams(model, context, { apiKey: "test-key", cacheRetention: "none" });
+    deepStrictEqual(result.messages, [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call",
+            content: [
+              { type: "text", text: "说明" },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "AQ==" } },
+            ],
+            is_error: false,
+          },
+        ],
+      },
+    ]);
   });
 });

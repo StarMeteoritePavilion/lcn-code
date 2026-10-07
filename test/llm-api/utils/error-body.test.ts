@@ -78,3 +78,22 @@ describe("formatProviderError", (): void => {
     );
   });
 });
+
+describe("提供商错误响应边界", (): void => {
+  it("Bedrock原始字符串响应体和仅响应对象状态可直接提取", (): void => {
+    const error = Object.assign(new Error("请求失败"), {
+      $response: { statusCode: 502, body: " 原始响应 " },
+    });
+    const result = normalizeProviderError(error);
+    strictEqual(result.status, 502);
+    strictEqual(result.body, "原始响应");
+    strictEqual(formatProviderError(result), "502: 原始响应");
+  });
+  it("不可JSON序列化的抛出值与空原型响应体安全处理", (): void => {
+    strictEqual(normalizeProviderError(undefined).message, "undefined");
+    const body: Record<string, unknown> = Object.create(null);
+    body.error = "失败";
+    const error = Object.assign(new Error("错误"), { status: 400, error: body });
+    strictEqual(normalizeProviderError(error).body, '{"error":"失败"}');
+  });
+});

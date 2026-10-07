@@ -32,8 +32,12 @@ import type {
   Message,
   SystemMessage,
   UserMessage,
+  Model,
+  TranscriptContext,
+  SimpleStreamOptions,
 } from "../../src/llm-api/types.ts";
 import { getCurrentTools, toToolDeclaration } from "../../src/llm-api/utils/transcript.ts";
+import { setDefaultStreamFn } from "../../src/agent-loop/stream-fn.ts";
 import { testModel } from "../llm-api/fixtures.ts";
 import { assistant, tool } from "../llm-api/helpers.ts";
 
@@ -1427,5 +1431,413 @@ describe("真实演示之外的循环边界", (): void => {
     });
     strictEqual(outcome.result.structuredContent, undefined);
     deepStrictEqual(outcome.result.content, [{ type: "text", text: "覆盖" }]);
+  });
+});
+
+describe("循环响应结算与工具取消边界", (): void => {
+  for (const hasPartial of [false, true]) {
+    it(`没有终结事件且${hasPartial ? "存在" : "不存在"}部分消息时采用流的最终结果`, async (): Promise<void> => {
+      const final = assistant();
+      const events: AgentEvent[] = [];
+      const messages = await runAgentLoop(
+        [userMessage()],
+        { messages: [] },
+        loopConfig(),
+        (event: AgentEvent): void => {
+          events.push(event);
+        },
+        undefined,
+        (): AssistantMessageEventStream => {
+          const stream = new AssistantMessageEventStream();
+          if (hasPartial) {
+            stream.push({
+              type: "start",
+              partial: assistant({ content: [], stopReason: "pending" }),
+            });
+          }
+          stream.end(final);
+          return stream;
+        },
+      );
+      deepStrictEqual(messages, [userMessage(), final]);
+      const starts = events.filter((event: AgentEvent): boolean => event.type === "message_start");
+      strictEqual(starts.length, 2);
+      const ends = events.filter((event: AgentEvent): boolean => event.type === "message_end");
+      strictEqual(ends.length, 2);
+      if (ends[1]?.type === "message_end") {
+        strictEqual(ends[1].message, final);
+      }
+    });
+  }
+
+  it("并行工具预检后续调用取消时不启动已准备的工具", async (): Promise<void> => {
+    const controller = new AbortController();
+    let executions = 0;
+    const target = executableTool(async (): Promise<AgentToolResult> => {
+      executions++;
+      return toolResult();
+    });
+    const config = loopConfig();
+    /**
+     * 第二个调用准备期间取消整个批次。
+     * @param context - 当前工具调用上下文。
+     * @returns 不附加阻止决定。
+     */
+    config.beforeToolCall = async (context: BeforeToolCallContext): Promise<undefined> => {
+      if (context.toolCall.id === "第二次调用") {
+        controller.abort();
+      }
+      return undefined;
+    };
+    const messages = await runAgentLoop(
+      [userMessage()],
+      { messages: [], tools: [target] },
+      config,
+      (): void => {},
+      controller.signal,
+      memoryStream(
+        assistant({
+          content: [toolCall(), { ...toolCall(), id: "第二次调用" }],
+          stopReason: "toolUse",
+        }),
+        assistant({ stopReason: "aborted" }),
+      ),
+    );
+    strictEqual(executions, 0);
+    const results = messages.filter(
+      (message: AgentMessage): boolean => message.role === "toolResult",
+    );
+    strictEqual(results.length, 2);
+    for (const result of results) {
+      if (result.role === "toolResult") {
+        strictEqual(result.isError, true);
+        deepStrictEqual(result.content, [{ type: "text", text: "Operation aborted" }]);
+      }
+    }
+  });
+
+  it("原样准备参数保留调用对象，完成后的部分结果不再传播", async (): Promise<void> => {
+    let lateUpdate: ((result: AgentToolResult) => void) | undefined;
+    const updates: AgentToolResult[] = [];
+    const call = toolCall();
+    const target = executableTool(
+      async (
+        _id: string,
+        _params: unknown,
+        _signal?: AbortSignal,
+        onUpdate?: (result: AgentToolResult) => void,
+      ): Promise<AgentToolResult> => {
+        lateUpdate = onUpdate;
+        onUpdate?.(toolResult());
+        return toolResult();
+      },
+    );
+    /**
+     * 保留原始参数对象。
+     * @param args - 原始调用参数。
+     * @returns 同一个参数对象。
+     */
+    target.prepareArguments = (args: unknown): unknown => args;
+    const outcome = await runToolCall(call, {
+      tools: [target],
+      assistantMessage: assistant(),
+      context: { messages: [] },
+      /**
+       * 保存完成前的部分结果。
+       * @param result - 当前部分结果。
+       */
+      onUpdate: (result: AgentToolResult): void => {
+        updates.push(result);
+      },
+    });
+    strictEqual(outcome.toolCall, call);
+    strictEqual(outcome.isError, false);
+    lateUpdate?.(toolResult());
+    strictEqual(updates.length, 1);
+  });
+
+  it("已取消且无预检钩子的单次调用返回取消结果，不执行工具", async (): Promise<void> => {
+    const controller = new AbortController();
+    controller.abort();
+    let executions = 0;
+    const target = executableTool(async (): Promise<AgentToolResult> => {
+      executions++;
+      return toolResult();
+    });
+    const outcome = await runToolCall(toolCall(), {
+      tools: [target],
+      assistantMessage: assistant(),
+      context: { messages: [] },
+      signal: controller.signal,
+    });
+    strictEqual(executions, 0);
+    strictEqual(outcome.isError, true);
+    deepStrictEqual(outcome.result.content, [{ type: "text", text: "Operation aborted" }]);
+  });
+});
+
+describe("并行工具准备与启动之间的取消", (): void => {
+  it("参数准备排入的取消微任务阻止已准备调用和后续预检", async (): Promise<void> => {
+    const controller = new AbortController();
+    let preparations = 0;
+    let executions = 0;
+    const target = executableTool(async (): Promise<AgentToolResult> => {
+      executions++;
+      return toolResult();
+    });
+    /**
+     * 在参数准备完成后的微任务阶段取消运行。
+     * @param args - 原始调用参数。
+     * @returns 原参数对象。
+     */
+    target.prepareArguments = (args: unknown): unknown => {
+      preparations++;
+      queueMicrotask((): void => controller.abort());
+      return args;
+    };
+    const messages = await runAgentLoop(
+      [userMessage()],
+      { messages: [], tools: [target] },
+      loopConfig(),
+      (): void => {},
+      controller.signal,
+      memoryStream(
+        assistant({
+          content: [toolCall(), { ...toolCall(), id: "第二次调用" }],
+          stopReason: "toolUse",
+        }),
+        assistant({ stopReason: "aborted" }),
+      ),
+    );
+    strictEqual(preparations, 1);
+    strictEqual(executions, 0);
+    const results = messages.filter(
+      (message: AgentMessage): boolean => message.role === "toolResult",
+    );
+    strictEqual(results.length, 1);
+    if (results[0]?.role === "toolResult") {
+      strictEqual(results[0].isError, true);
+      deepStrictEqual(results[0].content, [{ type: "text", text: "Operation aborted" }]);
+    }
+  });
+});
+
+describe("可选轮次字段及钩子异常", (): void => {
+  for (const level of [undefined, "off", "high"] as const) {
+    it(`下一轮准备${level === undefined ? "省略" : `设置 ${level}`}推理级别时保留其他请求字段`, async (): Promise<void> => {
+      const seen: (string | undefined)[] = [];
+      let turns = 0;
+      const config = loopConfig();
+      config.reasoning = "low";
+      /**
+       * 仅提供当前用例需要的推理字段。
+       * @returns 其余上下文和模型沿用当前值。
+       */
+      config.prepareRequest = (): AgentRequestUpdate => ({});
+      /**
+       * 第一轮继续，第二轮停止。
+       * @returns 当前轮次决定。
+       */
+      config.finishTurn = (): AgentTurnDecision => ({ action: ++turns === 1 ? "continue" : "end" });
+      /**
+       * 仅替换第二轮的推理设置。
+       * @returns 不携带上下文、模型或追加消息的更新。
+       */
+      config.prepareNextTurn = (): { thinkingLevel?: "off" | "high" } => ({ thinkingLevel: level });
+      const stream = memoryStream(assistant(), assistant());
+      await runAgentLoop(
+        [userMessage()],
+        { messages: [] },
+        config,
+        (): void => {},
+        undefined,
+        (
+          model: Model,
+          context: TranscriptContext,
+          options?: SimpleStreamOptions,
+        ): ReturnType<StreamFn> => {
+          seen.push(options?.reasoning);
+          return stream(model, context, options);
+        },
+      );
+      deepStrictEqual(seen, [
+        "low",
+        level === undefined ? "low" : level === "off" ? undefined : "high",
+      ]);
+    });
+  }
+
+  for (const hook of ["prepareArguments", "execute", "afterToolCall"] as const) {
+    it(`${hook}抛出非 Error 值时保留错误文本且标记失败`, async (): Promise<void> => {
+      const target = executableTool();
+      if (hook === "prepareArguments") {
+        /**
+         * 用字符串异常模拟参数准备失败。
+         * @returns 不返回参数。
+         * @throws 固定字符串异常。
+         */
+        target.prepareArguments = (): never => {
+          throw "钩子字符串错误";
+        };
+      }
+      if (hook === "execute") {
+        /**
+         * 用字符串异常模拟执行失败。
+         * @returns 不返回结果。
+         * @throws 固定字符串异常。
+         */
+        target.execute = async (): Promise<never> => {
+          throw "钩子字符串错误";
+        };
+      }
+      const outcome = await runToolCall(toolCall(), {
+        tools: [target],
+        assistantMessage: assistant(),
+        context: { messages: [] },
+        /**
+         * 在调用后阶段模拟字符串异常，其他用例不修改结果。
+         * @returns 不覆盖结果。
+         * @throws 调用后异常用例抛出固定字符串。
+         */
+        afterToolCall: async (): Promise<undefined> => {
+          if (hook === "afterToolCall") {
+            throw "钩子字符串错误";
+          }
+          return undefined;
+        },
+      });
+      strictEqual(outcome.isError, true);
+      deepStrictEqual(outcome.result.content, [{ type: "text", text: "钩子字符串错误" }]);
+    });
+  }
+});
+
+describe("默认流与工具可选字段", (): void => {
+  it("未显式传流函数时两个运行入口使用已配置默认流", async (): Promise<void> => {
+    setDefaultStreamFn(memoryStream(assistant(), assistant()));
+    try {
+      const prompted = await runAgentLoop(
+        [userMessage()],
+        { messages: [] },
+        loopConfig(),
+        (): void => {},
+        undefined,
+        undefined as unknown as StreamFn,
+      );
+      const continued = await runAgentLoopContinue(
+        { messages: [userMessage()] },
+        loopConfig(),
+        (): void => {},
+        undefined,
+        undefined as unknown as StreamFn,
+      );
+      strictEqual(prompted.at(-1)?.role, "assistant");
+      strictEqual(continued.at(-1)?.role, "assistant");
+    } finally {
+      setDefaultStreamFn(undefined);
+    }
+  });
+
+  it("无提示但有工具时插入声明，无工具数组时未知调用回填错误", async (): Promise<void> => {
+    const target = executableTool();
+    const declared = await runAgentLoop(
+      [],
+      { messages: [], tools: [target] },
+      loopConfig(),
+      (): void => {},
+      undefined,
+      memoryStream(assistant()),
+    );
+    strictEqual(declared[0]?.role, "system");
+    if (declared[0]?.role === "system") {
+      deepStrictEqual(declared[0].toolsAdded, [toToolDeclaration(target)]);
+    }
+    const unknown = await runAgentLoop(
+      [userMessage()],
+      { messages: [] },
+      loopConfig(),
+      (): void => {},
+      undefined,
+      memoryStream(assistant({ content: [toolCall()], stopReason: "toolUse" }), assistant()),
+    );
+    const result = unknown.find((message: AgentMessage): boolean => message.role === "toolResult");
+    if (result?.role === "toolResult") {
+      strictEqual(result.isError, true);
+      deepStrictEqual(result.content, [{ type: "text", text: "Tool 测试工具 not found" }]);
+    } else {
+      strictEqual(result?.role, "toolResult");
+    }
+  });
+
+  it("没有外部部分结果回调仍接受工具更新，调用后 Error 异常转为失败", async (): Promise<void> => {
+    const target = executableTool(
+      async (
+        _id: string,
+        _params: unknown,
+        _signal?: AbortSignal,
+        onUpdate?: (result: AgentToolResult) => void,
+      ): Promise<AgentToolResult> => {
+        onUpdate?.(toolResult());
+        return toolResult();
+      },
+    );
+    const result = await runToolCall(toolCall(), {
+      tools: [target],
+      assistantMessage: assistant(),
+      context: { messages: [] },
+      /**
+       * 模拟调用后钩子的标准异常。
+       * @returns 不产生覆盖值。
+       * @throws 固定 Error 异常。
+       */
+      afterToolCall: async (): Promise<never> => {
+        throw new Error("调用后失败");
+      },
+    });
+    strictEqual(result.isError, true);
+    deepStrictEqual(result.result.content, [{ type: "text", text: "调用后失败" }]);
+  });
+});
+
+describe("工具结果的缺省内容", (): void => {
+  it("运行时工具未提供 content 时回填空内容而不污染对话", async (): Promise<void> => {
+    const target = executableTool(
+      async (): Promise<AgentToolResult> => ({ details: {}, terminate: true }) as AgentToolResult,
+    );
+    const messages = await runAgentLoop(
+      [userMessage()],
+      { messages: [], tools: [target] },
+      loopConfig(),
+      (): void => {},
+      undefined,
+      memoryStream(assistant({ content: [toolCall()], stopReason: "toolUse" })),
+    );
+    const result = messages.at(-1);
+    strictEqual(result?.role, "toolResult");
+    if (result?.role === "toolResult") {
+      deepStrictEqual(result.content, []);
+      strictEqual(result.isError, false);
+    }
+  });
+});
+
+describe("空工具移除声明", (): void => {
+  it("没有工具变更且 toolsRemoved 为空时保留系统消息对象", async (): Promise<void> => {
+    const prompt: SystemMessage = {
+      role: "system",
+      content: "保持指令",
+      timestamp: 1,
+      toolsRemoved: [],
+    };
+    const messages = await runAgentLoop(
+      [prompt, userMessage()],
+      { messages: [] },
+      loopConfig(),
+      (): void => {},
+      undefined,
+      memoryStream(assistant()),
+    );
+    strictEqual(messages[0], prompt);
+    deepStrictEqual(prompt.toolsRemoved, []);
   });
 });

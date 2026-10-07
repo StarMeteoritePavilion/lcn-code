@@ -320,3 +320,40 @@ describe("loadAiConfig", (): void => {
     });
   });
 });
+
+describe("loadAiConfig 调用选项边界", (): void => {
+  it("忽略调用方显式 undefined 字段并保留提供商默认值", async (): Promise<void> => {
+    const config = createConfig();
+    config.modelProviders = [
+      {
+        name: "提供商",
+        api: "openai-completions",
+        baseUrl: "https://example.test/v1",
+        apiKey: "静态密钥",
+        models: [{ id: "模型" }],
+        requestOptions: { temperature: 0.5 },
+      },
+    ];
+    await withConfig(config, async (directory: string): Promise<void> => {
+      const result = await loadAiConfig(directory, { temperature: undefined, headers: undefined });
+      deepStrictEqual(result.options, { temperature: 0.5, apiKey: "静态密钥" });
+    });
+  });
+});
+
+describe("loadAiConfig 缺少模型定义", (): void => {
+  it("选中的提供商没有 models 时报告模型未匹配", async (): Promise<void> => {
+    const config = createConfig();
+    config.modelProviders = [
+      {
+        name: "提供商",
+        api: "openai-completions",
+        baseUrl: "https://example.test/v1",
+        apiKey: "静态密钥",
+      },
+    ];
+    await withConfig(config, async (directory: string): Promise<void> => {
+      await rejects(loadAiConfig(directory), /Configuration model does not exactly match/);
+    });
+  });
+});

@@ -198,3 +198,65 @@ describe("retryAssistantCall", (): void => {
     strictEqual(finished, true);
   });
 });
+
+describe("retryAssistantCall 退避异常", (): void => {
+  it("退避已开始后取消仍只调用一次并清理错误消息", async (): Promise<void> => {
+    const controller = new AbortController();
+    let calls = 0;
+    const result = await retryAssistantCall(
+      async (): Promise<AssistantMessage> => {
+        calls++;
+        return assistant({ stopReason: "error", errorMessage: "503" });
+      },
+      { enabled: true, maxRetries: 1, baseDelayMs: 1000 },
+      controller.signal,
+      {
+        /** 安排退避注册完成后的取消。 */
+        onRetryScheduled: (): void => {
+          setImmediate((): void => controller.abort());
+        },
+      },
+    );
+    strictEqual(calls, 1);
+    strictEqual(result.stopReason, "aborted");
+    strictEqual(result.errorMessage, undefined);
+  });
+  it("非取消等待错误原样传播且回调收到最后错误", async (): Promise<void> => {
+    const failure = new Error("信号注册失败");
+    const controller = new AbortController();
+    Object.defineProperty(controller.signal, "addEventListener", {
+      /**
+       * 模拟取消监听器注册失败。
+       * @throws 注册时抛出预设异常。
+       */
+      value: (): never => {
+        throw failure;
+      },
+    });
+    let finished = 0;
+    await rejects(
+      retryAssistantCall(
+        async (): Promise<AssistantMessage> =>
+          assistant({ stopReason: "error", errorMessage: "503" }),
+        { enabled: true, maxRetries: 1, baseDelayMs: 0 },
+        controller.signal,
+        {
+          /**
+           * 检查等待失败的结束通知。
+           * @param isSuccess - 是否成功。
+           * @param attempt - 重试序号。
+           * @param error - 最后错误文本。
+           */
+          onRetryFinished: (isSuccess: boolean, attempt: number, error?: string): void => {
+            finished++;
+            strictEqual(isSuccess, false);
+            strictEqual(attempt, 1);
+            strictEqual(error, "503");
+          },
+        },
+      ),
+      (error: unknown): boolean => error === failure,
+    );
+    strictEqual(finished, 1);
+  });
+});

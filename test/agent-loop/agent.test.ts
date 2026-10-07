@@ -1,6 +1,7 @@
 import { deepStrictEqual, rejects, strictEqual, throws } from "node:assert";
 import { describe, it } from "node:test";
-import { Agent } from "../../src/agent-loop/index.ts";
+import { Agent, type AgentOptions } from "../../src/agent-loop/index.ts";
+import { setDefaultStreamFn } from "../../src/agent-loop/stream-fn.ts";
 import type {
   AgentEvent,
   AgentMessage,
@@ -397,5 +398,93 @@ describe("Agent", (): void => {
     });
     await agent.prompt(user("执行"));
     deepStrictEqual(pending, [["call"], []]);
+  });
+});
+
+describe("Agent 续跑与失败边界", (): void => {
+  it("用户末尾续跑不重复追加原消息，传递启用的推理级别", async (): Promise<void> => {
+    const initial = user("待回答");
+    const agent = new Agent({
+      apiKey: "离线密钥",
+      initialState: { messages: [initial], thinkingLevel: "high", model: model() },
+      /**
+       * 检查续跑请求保留原上下文及推理设置。
+       * @param _model - 当前模型。
+       * @param context - 已有对话。
+       * @param options - 当前请求选项。
+       * @returns 固定离线回复。
+       */
+      streamFn: (
+        _model: Model,
+        context: TranscriptContext,
+        options?: SimpleStreamOptions,
+      ): AssistantMessageEventStream => {
+        deepStrictEqual(context.messages, [initial]);
+        strictEqual(options?.reasoning, "high");
+        return response();
+      },
+    });
+    await agent.continue();
+    deepStrictEqual(agent.state.messages, [initial, assistant({ thinkingLevel: "high" })]);
+  });
+
+  it("只有系统消息时续跑拒绝且保留后续队列", async (): Promise<void> => {
+    const agent = new Agent({
+      apiKey: "离线密钥",
+      streamFn: response,
+      initialState: { systemPrompt: "系统指令" },
+    });
+    const queued = user("后续");
+    agent.followUp(queued);
+    await rejects(agent.continue(), /No messages to continue from/);
+    deepStrictEqual(agent.peekQueuedMessages(), [queued]);
+    strictEqual(agent.state.isStreaming, false);
+  });
+
+  it("取消期间抛出的非 Error 值转换为 aborted 状态并释放等待者", async (): Promise<void> => {
+    const agent = new Agent({ apiKey: "离线密钥", streamFn: response });
+    /**
+     * 在请求入口取消并抛出字符串。
+     * @returns 此请求不会产生响应流。
+     * @throws 固定字符串表示请求失败。
+     */
+    agent.streamFunction = (): AssistantMessageEventStream => {
+      agent.abort();
+      throw "离线取消失败";
+    };
+    await agent.prompt("取消");
+    await agent.waitForIdle();
+    strictEqual(agent.state.errorMessage, "离线取消失败");
+    const last = agent.state.messages.at(-1);
+    strictEqual(last?.role, "assistant");
+    if (last?.role === "assistant") {
+      strictEqual(last.stopReason, "aborted");
+    }
+    strictEqual(agent.signal, undefined);
+  });
+});
+
+describe("Agent 构造时的默认流与异常配置", (): void => {
+  it("未传构造配置且未设置默认流时拒绝创建", (): void => {
+    setDefaultStreamFn(undefined);
+    throws(
+      (): Agent => new Agent(null as unknown as AgentOptions),
+      /No default stream function configured/,
+    );
+  });
+
+  it("运行时省略 streamFn 时采用默认流，运行完成后释放状态", async (): Promise<void> => {
+    setDefaultStreamFn(response);
+    try {
+      const agent = new Agent({ apiKey: "离线密钥" } as AgentOptions);
+      strictEqual(agent.streamFunction, response);
+      await agent.prompt("默认流请求");
+      strictEqual(agent.state.messages.at(-1)?.role, "assistant");
+      strictEqual(agent.state.isStreaming, false);
+      strictEqual(agent.state.errorMessage, undefined);
+      strictEqual(agent.signal, undefined);
+    } finally {
+      setDefaultStreamFn(undefined);
+    }
   });
 });

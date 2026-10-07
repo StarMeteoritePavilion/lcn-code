@@ -992,3 +992,61 @@ describe("openai-responses 原生选项", (): void => {
     }
   });
 });
+
+describe("openai-responses 简化选项边界", (): void => {
+  it("非推理模型简化请求省略推理配置，终态回调中取消保留正文", async (): Promise<void> => {
+    const model = { ...testModel("openai-responses"), reasoning: false };
+    let payload: Record<string, unknown> | undefined;
+    const result = await collectStream(
+      streamSimple(model, normalizeContext({ messages: [] }), {
+        apiKey: "test-key",
+        reasoning: "high",
+        onPayload: (value: unknown): void => {
+          payload = value as Record<string, unknown>;
+        },
+        fetch: async (): Promise<Response> => eventResponse(protocolEvents(model.api)),
+      }),
+    );
+    strictEqual(result.message.stopReason, "stop");
+    strictEqual(payload?.reasoning, undefined);
+    strictEqual(payload?.reasoning_effort, undefined);
+    const controller = new AbortController();
+    const aborted = await collectStream(
+      stream(model, normalizeContext({ messages: [] }), {
+        apiKey: "test-key",
+        signal: controller.signal,
+        fetch: async (): Promise<Response> => eventResponse(protocolEvents(model.api)),
+        onStreamEvent: (value: unknown): void => {
+          const event = value as Record<string, unknown>;
+          if (event.type === "response.completed") {
+            controller.abort();
+          }
+        },
+      }),
+    );
+    strictEqual(aborted.message.stopReason, "aborted");
+    strictEqual(aborted.events.at(-1)?.type, "error");
+    ok(aborted.message.content.length > 0);
+  });
+});
+
+describe("Responses OpenRouter 会话亲和", (): void => {
+  it("端点默认格式发送 x-session-id", async (): Promise<void> => {
+    const model = { ...testModel("openai-responses"), baseUrl: "https://openrouter.ai/api/v1" };
+    let headers: Headers | undefined;
+    const result = await collectStream(
+      stream(model, normalizeContext({ messages: [] }), {
+        apiKey: "test-key",
+        sessionId: "session-test",
+        cacheRetention: "short",
+        timeoutMs: 1000,
+        fetch: async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+          headers = new Headers(init?.headers);
+          return eventResponse(protocolEvents(model.api));
+        },
+      }),
+    );
+    strictEqual(result.message.stopReason, "stop");
+    strictEqual(headers?.get("x-session-id"), "session-test");
+  });
+});

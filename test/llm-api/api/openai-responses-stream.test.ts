@@ -132,3 +132,61 @@ describe("processResponsesStream", (): void => {
     );
   });
 });
+
+describe("Responses 推理摘要增量", (): void => {
+  it("摘要分段结束追加空行并保留最终签名", async (): Promise<void> => {
+    const item = { type: "reasoning", id: "r1", summary: [], encrypted_content: "encrypted" };
+    const output = emptyOutput();
+    const stream = new AssistantMessageEventStream();
+    await processResponsesStream(
+      nativeEvents([
+        { type: "response.output_item.added", output_index: 0, item },
+        { type: "response.reasoning_summary_text.delta", output_index: 0, delta: "摘要" },
+        { type: "response.reasoning_summary_part.done", output_index: 0 },
+        { type: "response.output_item.done", output_index: 0, item },
+        {
+          type: "response.completed",
+          response: { status: "completed", output: [item, { ...item, id: "unknown" }] },
+        },
+      ]),
+      output,
+      stream,
+      testModel("openai-responses"),
+    );
+    strictEqual(output.content[0]?.type, "thinking");
+    const block = output.content[0];
+    if (block?.type === "thinking") {
+      strictEqual(block.thinking, "摘要\n\n");
+      strictEqual(block.thinkingSignature, JSON.stringify(item));
+    }
+  });
+});
+
+describe("Responses 非消息输出兼容", (): void => {
+  it("托管工具输出忽略正文槽位且不影响完成状态", async (): Promise<void> => {
+    const output = emptyOutput();
+    const stream = new AssistantMessageEventStream();
+    await processResponsesStream(
+      nativeEvents([
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { type: "web_search_call", id: "ws_1", status: "completed" },
+        },
+        { type: "response.reasoning_summary_part.done", output_index: 1 },
+        { type: "response.reasoning_text.delta", output_index: 1, delta: "未知推理槽位" },
+        {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: { type: "web_search_call", id: "ws_1", status: "completed" },
+        },
+        { type: "response.completed", response: { status: "completed", output: [] } },
+      ]),
+      output,
+      stream,
+      testModel("openai-responses"),
+    );
+    strictEqual(output.stopReason, "stop");
+    deepStrictEqual(output.content, []);
+  });
+});

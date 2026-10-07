@@ -226,3 +226,32 @@ describe("resolveTranscriptTools", (): void => {
     });
   });
 });
+
+describe("工具变更检测忽略非系统消息", (): void => {
+  it("非系统角色不能声明或重定义工具，空系统消息不产生变化", (): void => {
+    const messages = [{ role: "custom", toolsAdded: [tool()] }, system("只有提示词")];
+    strictEqual(transcript.hasToolRedefinitions(messages), false);
+    strictEqual(transcript.hasNonAdditiveToolChanges(messages), false);
+    deepStrictEqual(transcript.getDeclaredTools(messages), []);
+  });
+});
+
+describe("系统工具基线缺省时间戳", (): void => {
+  it("有工具声明的旧系统消息未提供时间戳时采用零", (): void => {
+    const target = tool();
+    const messages = [{ role: "system", content: "", toolsAdded: [target] }];
+    const result = transcript.getCurrentSystemMessage(messages);
+    strictEqual(result?.timestamp, 0);
+    deepStrictEqual(result?.toolsAdded, [target]);
+  });
+});
+
+describe("初始系统消息只有提示词", (): void => {
+  it("无工具时不写入toolsAdded属性", (): void => {
+    deepStrictEqual(transcript.createInitialSystemMessage("提示词", undefined), {
+      role: "system",
+      content: "提示词",
+      timestamp: 0,
+    });
+  });
+});

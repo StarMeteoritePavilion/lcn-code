@@ -94,6 +94,7 @@ describe("AssistantMessageFrameEncoder.encode", (): void => {
     partial.responseId = "response_test";
     partial.responseModel = "concrete-model";
     partial.thinkingEffort = "high";
+    partial.diagnostics = [{ type: "测试诊断", timestamp: 0, details: { value: "原值" } }];
     const encoder = new AssistantMessageFrameEncoder();
     const frame = encoder.encode({ type: "start", partial });
     ok(frame?.type === "start");
@@ -104,6 +105,10 @@ describe("AssistantMessageFrameEncoder.encode", (): void => {
     strictEqual(frame.partial.thinkingEffort, "high");
     partial.usage.input = 100;
     strictEqual(frame.partial.usage.input, 0);
+    partial.diagnostics[0]!.details!.value = "已修改";
+    deepStrictEqual(frame.partial.diagnostics, [
+      { type: "测试诊断", timestamp: 0, details: { value: "原值" } },
+    ]);
   });
 
   it("思考增量去重并保留结束签名及隐藏状态", (): void => {
@@ -126,7 +131,7 @@ describe("AssistantMessageFrameEncoder.encode", (): void => {
 
   it("工具增量追上初始快照时生成 checkpoint 并保留最终调用元数据", (): void => {
     const partial = emptyMessage();
-    const call = toolCall({ input: "你" });
+    const call: ToolCall = { ...toolCall({ input: "你" }), namespace: "初始" };
     partial.content = [call];
     const finalCall: ToolCall = {
       ...call,
@@ -407,5 +412,113 @@ describe("reduceAssistantMessageFrames", (): void => {
     throws((): void => {
       reduceAssistantMessageFrames([start, invalidFrame]);
     }, /contains thinking/);
+  });
+});
+
+describe("助手消息帧补充分支", (): void => {
+  it("编码器拒绝各内容结束和开始事件指向错误类型", (): void => {
+    const partial = emptyMessage();
+    partial.content = [{ type: "text", text: "" }];
+    const encoder = new AssistantMessageFrameEncoder();
+    encoder.encode({ type: "start", partial });
+    const events: AssistantMessageEvent[] = [
+      { type: "thinking_start", contentIndex: 0, partial },
+      { type: "thinking_end", contentIndex: 0, content: "", partial },
+      { type: "toolcall_start", contentIndex: 0, partial },
+      { type: "toolcall_end", contentIndex: 0, toolCall: toolCall(), partial },
+    ];
+    for (const event of events) {
+      throws((): unknown => encoder.encode(event), /points to text/);
+    }
+    partial.content = [{ type: "thinking", thinking: "" }];
+    throws(
+      (): unknown => encoder.encode({ type: "text_end", contentIndex: 0, content: "", partial }),
+      /points to thinking/,
+    );
+    partial.content = [toolCall()];
+    encoder.encode({ type: "toolcall_start", contentIndex: 0, partial });
+    const invalidCall = { type: "text", text: "错误类型" } as unknown as ToolCall;
+    throws(
+      (): unknown =>
+        encoder.encode({ type: "toolcall_end", contentIndex: 0, toolCall: invalidCall, partial }),
+      /invalid tool call/,
+    );
+  });
+
+  it("工具起始快照允许数组、嵌套数值和扩展字符串前缀，拒绝不兼容结构", (): void => {
+    const cases: [ToolCall["arguments"], string, boolean][] = [
+      [{ value: ["你", 1] }, '{"value":["你好",1,2]}', true],
+      [{ value: [1, 2] }, '{"value":[1]}', false],
+      [{ value: [1] }, '{"value":{}}', false],
+      [{ value: { nested: 1 } }, '{"value":[]}', false],
+      [{ value: { nested: 1 } }, '{"value":null}', false],
+      [{ value: "你" }, '{"value":2}', false],
+      [{ value: { nested: 1 } }, '{"value":{"nested":2}}', false],
+      [{ value: null }, '{"value":null}', true],
+    ];
+    for (const [argumentsValue, delta, shouldCheckpoint] of cases) {
+      const partial = emptyMessage();
+      partial.content = [toolCall(argumentsValue)];
+      const encoder = new AssistantMessageFrameEncoder();
+      encoder.encode({ type: "start", partial });
+      encoder.encode({ type: "toolcall_start", contentIndex: 0, partial });
+      const frame = encoder.encode({ type: "toolcall_delta", contentIndex: 0, delta, partial });
+      strictEqual(frame?.type, shouldCheckpoint ? "toolcall_checkpoint" : undefined);
+      if (shouldCheckpoint) {
+        deepStrictEqual(frame, { type: "toolcall_checkpoint", contentIndex: 0, json: delta });
+      }
+    }
+  });
+
+  it("无签名的文本和思考结束帧不保留过期字段，思考增量追上快照后继续追加", (): void => {
+    const partial = emptyMessage();
+    partial.content = [
+      { type: "thinking", thinking: "你" },
+      { type: "text", text: "" },
+      toolCall(),
+    ];
+    const frames = encodeFrames([
+      { type: "start", partial },
+      { type: "thinking_start", contentIndex: 0, partial },
+      { type: "thinking_delta", contentIndex: 0, delta: "你", partial },
+      { type: "thinking_delta", contentIndex: 0, delta: "好", partial },
+      { type: "thinking_end", contentIndex: 0, content: "你好", partial },
+      { type: "text_start", contentIndex: 1, partial },
+      { type: "text_delta", contentIndex: 1, delta: "答复", partial },
+      { type: "text_end", contentIndex: 1, content: "答复", partial },
+      { type: "toolcall_start", contentIndex: 2, partial },
+      { type: "toolcall_end", contentIndex: 2, toolCall: toolCall(), partial },
+    ]);
+    deepStrictEqual(reduceAssistantMessageFrames(frames)?.content, [
+      { type: "thinking", thinking: "你好" },
+      { type: "text", text: "答复" },
+      toolCall(),
+    ]);
+  });
+
+  it("回放器拒绝错误思考和工具起始类型，结束帧设置 namespace", (): void => {
+    const start: AssistantMessageFrame = { type: "start", partial: emptyMessage() };
+    const invalidFrames = [
+      { type: "thinking_start", contentIndex: 0, content: { type: "text", text: "错误" } },
+      { type: "toolcall_start", contentIndex: 0, toolCall: { type: "text", text: "错误" } },
+    ] as unknown as AssistantMessageFrame[];
+    for (const frame of invalidFrames) {
+      throws((): unknown => reduceAssistantMessageFrames([start, frame]), /contains text/);
+    }
+    const frames: AssistantMessageFrame[] = [
+      start,
+      { type: "toolcall_start", contentIndex: 0, toolCall: { ...toolCall(), namespace: "初始" } },
+      {
+        type: "toolcall_end",
+        contentIndex: 0,
+        id: "结束",
+        name: "echo",
+        arguments: {},
+        namespace: "最终",
+      },
+    ];
+    deepStrictEqual(reduceAssistantMessageFrames(frames)?.content, [
+      { type: "toolCall", id: "结束", name: "echo", arguments: {}, namespace: "最终" },
+    ]);
   });
 });

@@ -884,3 +884,95 @@ describe("Anthropic 入口原生回调委托", (): void => {
     match(result.message.content[0]?.type ?? "", /text/);
   });
 });
+
+describe("Anthropic 自适应思考与终态分支", (): void => {
+  it("简化选项映射自适应 effort 且允许模型覆写", async (): Promise<void> => {
+    for (const reasoning of ["minimal", "low", "medium", "high", "xhigh"] as const) {
+      for (const hasMapping of [false, true]) {
+        const model = {
+          ...testModel("anthropic-messages"),
+          reasoning: true,
+          compat: { forceAdaptiveThinking: true },
+          thinkingLevelMap: hasMapping ? { [reasoning]: "max" } : undefined,
+        };
+        let payload: MessageCreateParamsStreaming | undefined;
+        const result = await collectStream(
+          streamSimple(model, normalizeContext({ messages: [] }), {
+            apiKey: "test-key",
+            reasoning,
+            onPayload: (value: unknown): void => {
+              payload = value as MessageCreateParamsStreaming;
+            },
+            fetch: async (): Promise<Response> => eventResponse(protocolEvents(model.api)),
+          }),
+        );
+        strictEqual(result.message.stopReason, "stop");
+        const expected = hasMapping
+          ? "max"
+          : reasoning === "minimal"
+            ? "low"
+            : reasoning === "xhigh"
+              ? "high"
+              : reasoning;
+        deepStrictEqual(payload?.output_config, { effort: expected });
+      }
+    }
+  });
+  it("停止原因、拒绝详情及所有增量用量按协议更新", async (): Promise<void> => {
+    const cases = [
+      { raw: "max_tokens", reason: "length" },
+      { raw: "pause_turn", reason: "stop" },
+      { raw: "stop_sequence", reason: "stop" },
+      { raw: "refusal", reason: "error" },
+      { raw: "sensitive", reason: "error" },
+    ];
+    for (const entry of cases) {
+      const events = protocolEvents("anthropic-messages");
+      const delta = events[5];
+      ok(delta);
+      delta.delta = {
+        stop_reason: entry.raw,
+        stop_details: entry.raw === "refusal" ? { explanation: "请求被拒绝" } : undefined,
+      };
+      delta.usage = {
+        input_tokens: 4,
+        output_tokens: 5,
+        cache_read_input_tokens: 6,
+        cache_creation_input_tokens: 7,
+      };
+      const result = await collectStream(
+        stream(testModel("anthropic-messages"), normalizeContext({ messages: [] }), {
+          apiKey: "test-key",
+          fetch: async (): Promise<Response> => eventResponse(events),
+        }),
+      );
+      strictEqual(result.message.stopReason, entry.reason);
+      strictEqual(result.message.rawStopReason, entry.raw);
+      strictEqual(result.message.usage.input, 4);
+      strictEqual(result.message.usage.output, 5);
+      strictEqual(result.message.usage.cacheRead, 6);
+      strictEqual(result.message.usage.cacheWrite, 7);
+      strictEqual(result.message.usage.totalTokens, 22);
+      if (entry.raw === "refusal") {
+        strictEqual(result.message.errorMessage, "请求被拒绝");
+      }
+    }
+  });
+  it("非 Error 的准备异常序列化为错误且不发起请求", async (): Promise<void> => {
+    let requests = 0;
+    const result = await collectStream(
+      stream(testModel("anthropic-messages"), normalizeContext({ messages: [] }), {
+        apiKey: "test-key",
+        onPayload: (): never => {
+          throw { message: "准备异常" };
+        },
+        fetch: async (): Promise<Response> => {
+          requests++;
+          return eventResponse(protocolEvents("anthropic-messages"));
+        },
+      }),
+    );
+    strictEqual(requests, 0);
+    strictEqual(result.message.errorMessage, '{"message":"准备异常"}');
+  });
+});

@@ -233,3 +233,32 @@ describe("processAnthropicStream", (): void => {
     );
   });
 });
+
+describe("Anthropic SSE 文本边界", (): void => {
+  it("仅 CR 换行可以解析完整响应，非法事件正文报告上下文", async (): Promise<void> => {
+    const events = protocolEvents("anthropic-messages");
+    const body = events
+      .map(
+        (event: Record<string, unknown>): string =>
+          `event: ${String(event.type)}\rdata: ${JSON.stringify(event)}\r\r`,
+      )
+      .join("");
+    const output = createOutput();
+    await processAnthropicStream(
+      new Response(body),
+      testModel("anthropic-messages"),
+      output,
+      new AssistantMessageEventStream(),
+    );
+    strictEqual(output.stopReason, "stop");
+    await rejects(
+      processAnthropicStream(
+        new Response("event: message_start\ndata: null\n\n"),
+        testModel("anthropic-messages"),
+        createOutput(),
+        new AssistantMessageEventStream(),
+      ),
+      /Could not parse Anthropic SSE event message_start/,
+    );
+  });
+});

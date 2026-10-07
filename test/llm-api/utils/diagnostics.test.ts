@@ -77,3 +77,14 @@ describe("appendAssistantMessageDiagnostic", (): void => {
     strictEqual(message.diagnostics[0]?.error?.message, "42");
   });
 });
+
+describe("诊断名称边界", (): void => {
+  it("空错误名称省略，非字符串或数字code不写入", (): void => {
+    const error = new Error("消息");
+    error.name = "";
+    const result = extractDiagnosticError(error);
+    strictEqual(result.name, undefined);
+    strictEqual(result.message, "消息");
+    strictEqual(result.code, undefined);
+  });
+});

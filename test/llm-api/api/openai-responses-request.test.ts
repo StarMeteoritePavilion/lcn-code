@@ -9,6 +9,8 @@ import {
 import type { AssistantMessage, OpenAIResponsesCompat, Tool } from "../../../src/llm-api/types.ts";
 import { normalizeContext } from "../../../src/llm-api/utils/transcript.ts";
 import { testModel } from "../fixtures.ts";
+import { assistant } from "../helpers.ts";
+import { shortHash } from "../../../src/llm-api/utils/hash.ts";
 
 const COMPAT: Required<OpenAIResponsesCompat> = {
   supportsDeveloperRole: true,
@@ -230,5 +232,189 @@ describe("buildParams", (): void => {
         defer_loading: true,
       },
     ]);
+  });
+});
+
+describe("Responses 跨端点历史 ID", (): void => {
+  it("单段 ID 清洗，跨端点组合 ID 散列，无正文历史被忽略", (): void => {
+    const model = testModel("openai-responses");
+    for (const id of ["call+", "call|item", "call|fc_item"]) {
+      const previous = assistant({
+        content: [{ type: "toolCall", id, name: "echo", arguments: { value: 1 } }],
+      });
+      const params = buildParams(
+        model,
+        normalizeContext({ messages: [previous] }),
+        { apiKey: "test-key" },
+        COMPAT,
+        new Map(),
+      );
+      const input = params.input as unknown as Array<Record<string, unknown>>;
+      const expectedId = id.includes("|") ? `fc_${shortHash(id.split("|")[1] ?? "")}` : undefined;
+      deepStrictEqual(input[0], {
+        type: "function_call",
+        call_id: "call",
+        id: expectedId,
+        name: "echo",
+        arguments: '{"value":1}',
+      });
+    }
+    const previous = assistant({
+      api: model.api,
+      model: "other",
+      content: [{ type: "toolCall", id: "call|item", name: "echo", arguments: {} }],
+    });
+    const params = buildParams(
+      model,
+      normalizeContext({
+        messages: [
+          previous,
+          assistant({ content: [] }),
+          { role: "user", content: [], timestamp: 0 },
+        ],
+      }),
+      { apiKey: "test-key" },
+      COMPAT,
+      new Map(),
+    );
+    const input = params.input as unknown as Array<Record<string, unknown>>;
+    strictEqual(input[0]?.id, undefined);
+    strictEqual(input.length, 2);
+  });
+});
+
+describe("Responses 请求可达边界", (): void => {
+  it("推理关闭映射、摘要默认等级及工具选择保持精确字段", (): void => {
+    const model = { ...testModel("openai-responses"), reasoning: true };
+    for (const off of [undefined, null, "low"]) {
+      const output = buildParams(
+        { ...model, thinkingLevelMap: { off } },
+        normalizeContext({ messages: [] }),
+        { apiKey: "test-key", toolChoice: "none" },
+        COMPAT,
+        new Map(),
+      );
+      strictEqual(output.tool_choice, "none");
+      deepStrictEqual(output.reasoning, off === null ? undefined : { effort: off ?? "none" });
+    }
+    const summary = buildParams(
+      model,
+      normalizeContext({ messages: [] }),
+      { apiKey: "test-key", reasoningSummary: "detailed" },
+      COMPAT,
+      new Map(),
+    );
+    deepStrictEqual(summary.reasoning, { effort: "medium", summary: "detailed" });
+    const disabled = buildParams(
+      { ...model, reasoning: false },
+      normalizeContext({ messages: [] }),
+      { apiKey: "test-key", reasoningEffort: "high" },
+      COMPAT,
+      new Map(),
+    );
+    strictEqual(disabled.reasoning, undefined);
+  });
+  it("超长文本签名生成短哈希且跨协议文法历史省略条目 ID", (): void => {
+    const model = testModel("openai-responses");
+    const signature = "msg_" + "x".repeat(70);
+    const output = buildParams(
+      model,
+      signedContext(signature),
+      { apiKey: "test-key" },
+      COMPAT,
+      new Map(),
+    );
+    const input = output.input as unknown as Array<Record<string, unknown>>;
+    strictEqual(input[0]?.id, `msg_${shortHash(signature)}`);
+    const history = assistant({
+      content: [
+        { type: "toolCall", id: "call|ctc_item", name: "echo", arguments: { input: "内容" } },
+      ],
+    });
+    const custom = buildParams(
+      model,
+      normalizeContext({ messages: [history] }),
+      { apiKey: "test-key" },
+      COMPAT,
+      new Map([["echo", "input"]]),
+    );
+    const customInput = custom.input as unknown as Array<Record<string, unknown>>;
+    deepStrictEqual(customInput[0], {
+      type: "custom_tool_call",
+      id: undefined,
+      call_id: "call",
+      name: "echo",
+      input: "内容",
+    });
+    strictEqual(customInput[1]?.type, "custom_tool_call_output");
+  });
+});
+
+describe("Responses 原生新增工具", (): void => {
+  it("有 additional_tools 能力时只在新增位置发出声明，空系统更新不发工具", (): void => {
+    const model = testModel("openai-responses");
+    const declaredTool = {
+      name: "echo",
+      description: "回显",
+      parameters: Type.Object({ input: Type.String() }),
+    };
+    const context = normalizeContext({
+      messages: [
+        { role: "system", content: "初始", timestamp: 0 },
+        { role: "user", content: "问题", timestamp: 1 },
+        { role: "system", content: "新增工具", toolsAdded: [declaredTool], timestamp: 2 },
+        { role: "system", content: "普通更新", timestamp: 3 },
+      ],
+    });
+    const result = buildParams(
+      model,
+      context,
+      { apiKey: "test-key" },
+      { ...COMPAT, supportsAdditionalTools: true },
+      new Map(),
+    );
+    const input = result.input as unknown as Array<Record<string, unknown>>;
+    const added = input.filter(
+      (entry: Record<string, unknown>): boolean => entry.type === "additional_tools",
+    );
+    strictEqual(added.length, 1);
+    strictEqual(added[0]?.role, "developer");
+    deepStrictEqual(added[0]?.tools, [
+      {
+        type: "function",
+        name: "echo",
+        description: "回显",
+        parameters: {
+          type: "object",
+          properties: { input: { type: "string" } },
+          required: ["input"],
+        },
+      },
+    ]);
+  });
+});
+
+describe("Responses 显式缓存策略", (): void => {
+  it("禁用、长缓存和不支持长缓存分别选择精确字段", (): void => {
+    for (const cacheRetention of ["none", "short", "long"] as const) {
+      for (const supportsLongCacheRetention of [false, true]) {
+        const output = buildParams(
+          testModel("openai-responses"),
+          normalizeContext({ messages: [] }),
+          { apiKey: "test-key", cacheRetention },
+          { ...COMPAT, supportsExplicitPromptCacheMode: true, supportsLongCacheRetention },
+          new Map(),
+        );
+        const fields = output as unknown as Record<string, unknown>;
+        deepStrictEqual(
+          fields.prompt_cache_options,
+          cacheRetention === "none"
+            ? { mode: "explicit" }
+            : cacheRetention === "long" && supportsLongCacheRetention
+              ? { ttl: "30m" }
+              : undefined,
+        );
+      }
+    }
   });
 });

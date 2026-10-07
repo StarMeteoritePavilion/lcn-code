@@ -5,6 +5,7 @@ import {
   estimateContextTokens,
 } from "../../../src/llm-api/utils/estimate.ts";
 import type { Message, JsonObject } from "../../../src/llm-api/types.ts";
+import { normalizeContext } from "../../../src/llm-api/utils/transcript.ts";
 import { assistant, tool } from "../helpers.ts";
 
 describe("estimateMessageTokens", (): void => {
@@ -101,5 +102,34 @@ describe("estimateContextTokens", (): void => {
       assistant({ timestamp: 1, content: [] }),
     ];
     strictEqual(estimateContextTokens(messages).lastUsageIndex, null);
+  });
+});
+
+describe("估算序列化与零用量", (): void => {
+  it("无法序列化为JSON的工具参数按undefined文本估算", (): void => {
+    const message = assistant({
+      content: [
+        {
+          type: "toolCall",
+          id: "调用",
+          name: "abcd",
+          arguments: undefined as unknown as JsonObject,
+        },
+      ],
+    });
+    strictEqual(estimateMessageTokens(message), Math.ceil((4 + "undefined".length) / 4));
+  });
+  it("没有有效用量时按消息估算，规范化上下文与消息数组一致", (): void => {
+    const message = assistant({ content: [{ type: "text", text: "12345" }] });
+    message.usage.input = 0;
+    message.usage.output = 0;
+    message.usage.totalTokens = 0;
+    const context = normalizeContext({ messages: [message] });
+    deepStrictEqual(estimateContextTokens(context), {
+      tokens: 2,
+      usageTokens: 0,
+      trailingTokens: 2,
+      lastUsageIndex: null,
+    });
   });
 });

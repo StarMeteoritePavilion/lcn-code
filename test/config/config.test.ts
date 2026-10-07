@@ -1,5 +1,5 @@
 import { deepStrictEqual, rejects, strictEqual } from "node:assert";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -169,6 +169,22 @@ describe("loadConfig", (): void => {
           process.env.toString = previous;
         }
       }
+    });
+  });
+});
+
+describe("loadConfig 文件读取失败", (): void => {
+  it("settings.json 是目录时报告读取失败", async (): Promise<void> => {
+    await withDirectory(async (directory: string): Promise<void> => {
+      await mkdir(join(directory, "settings.json"));
+      await rejects(loadConfig(directory), /Failed to read configuration file:.*settings\.json/);
+    });
+  });
+  it(".env 是目录时报告读取失败", async (): Promise<void> => {
+    await withDirectory(async (directory: string): Promise<void> => {
+      await writeFile(join(directory, "settings.json"), "{}");
+      await mkdir(join(directory, ".env"));
+      await rejects(loadConfig(directory), /Failed to read configuration file:.*\.env/);
     });
   });
 });

@@ -193,3 +193,117 @@ describe("createGrammarToolInputProperties", (): void => {
     }, /exactly one required/);
   });
 });
+
+describe("严格 schema 递归与错误分支", (): void => {
+  it("保留允许 null 的可选字段并递归转换数组元素", (): void => {
+    const nullable = [
+      { type: ["string", "null"] },
+      { const: null },
+      { enum: ["a", null] },
+      { anyOf: [{ type: "string" }, { type: "null" }] },
+    ];
+    for (const property of nullable) {
+      const strict = makeStrictJsonSchema({
+        type: "object",
+        properties: { item: property },
+      } as Tool["parameters"]);
+      deepStrictEqual(strict.properties, { item: property });
+    }
+    const result = makeStrictJsonSchema({
+      type: "object",
+      properties: {
+        list: {
+          type: "array",
+          items: { type: "object", properties: { item: { type: "string" } } },
+        },
+      },
+      required: ["list"],
+    } as Tool["parameters"]);
+    deepStrictEqual(result.properties, {
+      list: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { item: { anyOf: [{ type: "string" }, { type: "null" }] } },
+          required: ["item"],
+          additionalProperties: false,
+        },
+      },
+    });
+  });
+  it("非法对象、联合、元组和必填字段拒绝且 prefer 只降级不支持结构", (): void => {
+    const invalid: Array<{ schema: unknown; error: RegExp }> = [
+      {
+        schema: { type: "object", properties: { x: { anyOf: [true] } } },
+        error: /boolean schemas/,
+      },
+      { schema: null, error: /root schema/ },
+      { schema: { type: "object", $ref: "#/other" }, error: /unsupported/ },
+      { schema: { type: "object", properties: [] }, error: /schema map/ },
+      { schema: { type: "object", additionalProperties: true }, error: /additionalProperties/ },
+      { schema: { type: "object", required: "x" }, error: /string array/ },
+      { schema: { type: "object", required: [1] }, error: /string array/ },
+      { schema: { type: "object", properties: { x: { anyOf: [] } } }, error: /at least one/ },
+      { schema: { type: "object", properties: { x: { anyOf: {} } } }, error: /at least one/ },
+      {
+        schema: { type: "object", properties: { x: { anyOf: [{ type: ["object", "null"] }] } } },
+        error: /unions/,
+      },
+      {
+        schema: { type: "object", properties: { x: { anyOf: [{ properties: {} }] } } },
+        error: /unions/,
+      },
+      {
+        schema: { type: "object", properties: { x: { type: "array", items: [] } } },
+        error: /tuple/,
+      },
+      {
+        schema: { type: "object", properties: { x: { type: "string", properties: {} } } },
+        error: /properties require/,
+      },
+    ];
+    for (const entry of invalid) {
+      throws((): void => {
+        makeStrictJsonSchema(entry.schema as Tool["parameters"]);
+      }, entry.error);
+    }
+    const configured = grammarTool();
+    configured.constrainedSampling = { type: "json_schema", strict: "prefer" };
+    configured.parameters = { type: "object", additionalProperties: true } as Tool["parameters"];
+    strictEqual(resolveStrictJsonSchema(configured, true), undefined);
+    const failure = new Error("检查函数异常");
+    throws(
+      (): void => {
+        resolveStrictJsonSchema(configured, true, (): boolean => {
+          throw failure;
+        });
+      },
+      (error: unknown): boolean => error === failure,
+    );
+  });
+  it("语法工具 schema 必须为对象且有唯一必填字符串输入", (): void => {
+    const cases: Array<{ parameters: unknown; error: RegExp }> = [
+      { parameters: { type: "object", required: ["missing"] }, error: /properties entry/ },
+      { parameters: { type: "string" }, error: /object parameter schema/ },
+      {
+        parameters: {
+          type: "object",
+          properties: { input: { type: "string" }, extra: { type: "string" } },
+          required: ["input", "extra"],
+        },
+        error: /exactly one/,
+      },
+      {
+        parameters: { type: "object", properties: { input: { type: "string" } }, required: [] },
+        error: /exactly one/,
+      },
+    ];
+    for (const entry of cases) {
+      const configured = grammarTool();
+      configured.parameters = entry.parameters as Tool["parameters"];
+      throws((): void => {
+        resolveGrammarConstrainedSampling(configured, true);
+      }, entry.error);
+    }
+  });
+});

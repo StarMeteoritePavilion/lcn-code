@@ -399,3 +399,14 @@ describe("validateAiConfig", (): void => {
     );
   });
 });
+
+describe("validateAiConfig 空模型列表", (): void => {
+  it("已声明协议但未配置 models 时仅校验提供商请求选项", (): void => {
+    const config = {
+      provider: "服务",
+      model: "模型",
+      modelProviders: [{ name: "服务", api: "openai-completions", requestOptions: {} }],
+    };
+    doesNotThrow((): void => validateAiConfig(config));
+  });
+});

@@ -115,3 +115,136 @@ describe("processCompletionsStream", (): void => {
     );
   });
 });
+
+describe("processCompletionsStream：增量及终态分支", (): void => {
+  it("所有兼容停止原因映射并保留原值", async (): Promise<void> => {
+    const cases = [
+      { raw: "end", reason: "stop" },
+      { raw: "length", reason: "length" },
+      { raw: "function_call", reason: "toolUse" },
+      { raw: "content_filter", reason: "error" },
+      { raw: "network_error", reason: "error" },
+      { raw: "unexpected", reason: "error" },
+    ];
+    for (const entry of cases) {
+      const output = assistant({ content: [], stopReason: "pending" });
+      const stream = new AssistantMessageEventStream();
+      const result = await processCompletionsStream(
+        chunks([{ choices: [{ finish_reason: entry.raw }] }]),
+        output,
+        testModel("openai-completions"),
+        new Map(),
+        stream,
+      );
+      strictEqual(result.hasFinishReason, true);
+      strictEqual(output.rawStopReason, entry.raw);
+      strictEqual(output.stopReason, entry.reason);
+      strictEqual(
+        output.errorMessage,
+        entry.reason === "error" ? `Endpoint finish_reason: ${entry.raw}` : undefined,
+      );
+    }
+  });
+  it("通过 ID 关联无索引增量并补齐名称及索引，自定义输入切换后正确完成", async (): Promise<void> => {
+    const output = assistant({ content: [], stopReason: "pending" });
+    const stream = new AssistantMessageEventStream();
+    const events = [
+      { choices: [{ delta: { tool_calls: [{ id: "custom" }] } }] },
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ id: "custom", index: 4, custom: { name: "echo", input: "甲" } }],
+            },
+          },
+        ],
+      },
+      { choices: [{ delta: { tool_calls: [{ index: 4, custom: { input: "乙" } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 5 }] } }] },
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 5, id: "function", function: { name: "echo", arguments: '{"value":1}' } },
+              ],
+            },
+          },
+        ],
+      },
+      { choices: [{ finish_reason: "tool_calls" }] },
+    ];
+    await processCompletionsStream(
+      chunks(events),
+      output,
+      testModel("openai-completions"),
+      new Map([["echo", "input"]]),
+      stream,
+    );
+    deepStrictEqual(output.content, [
+      { type: "toolCall", id: "custom", name: "echo", arguments: { input: "甲乙" } },
+      { type: "toolCall", id: "function", name: "echo", arguments: { value: 1 } },
+    ]);
+    stream.end(output);
+    const collected = await collectStream(stream);
+    const deltas = collected.events
+      .filter((event: AssistantMessageEvent): boolean => event.type === "toolcall_delta")
+      .map((event: AssistantMessageEvent): string =>
+        event.type === "toolcall_delta" ? event.delta : "",
+      );
+    deepStrictEqual(deltas, ["", '{"input":"甲', "乙", "", '{"value":1}', '"}']);
+  });
+  it("忽略无效分片和 reasoning detail，优先推理正文并读取 choice 用量", async (): Promise<void> => {
+    const output = assistant({ content: [], stopReason: "pending" });
+    const stream = new AssistantMessageEventStream();
+    const events = [
+      null,
+      1,
+      {},
+      { choices: [] },
+      {
+        model: "fallback",
+        choices: [
+          {
+            usage: { prompt_tokens: 3, completion_tokens: 2, prompt_cache_hit_tokens: 1 },
+            delta: {
+              reasoning_content: "甲",
+              reasoning: "忽略",
+              reasoning_details: [{ type: "invalid" }],
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            usage: { prompt_tokens: 2, cached_tokens: 3 },
+            delta: { reasoning_text: "乙" },
+            finish_reason: "stop",
+          },
+        ],
+      },
+    ];
+    await processCompletionsStream(
+      chunks(events as Record<string, unknown>[]),
+      output,
+      testModel("openai-completions"),
+      new Map(),
+      stream,
+    );
+    deepStrictEqual(output.content, [
+      { type: "thinking", thinking: "甲乙", thinkingSignature: "reasoning_content" },
+    ]);
+    strictEqual(output.responseModel, "fallback");
+    strictEqual(output.usage.input, 0);
+    strictEqual(output.usage.cacheRead, 3);
+    strictEqual(output.usage.output, 0);
+    strictEqual(output.usage.totalTokens, 3);
+    stream.end(output);
+    const collected = await collectStream(stream);
+    deepStrictEqual(
+      collected.events.map((event: AssistantMessageEvent): string => event.type),
+      ["thinking_start", "thinking_delta", "thinking_delta", "thinking_end"],
+    );
+  });
+});

@@ -50,3 +50,11 @@ describe("parseStreamingJson", (): void => {
     deepStrictEqual(parseStreamingJson('{"a":"x\ny"'), {});
   });
 });
+
+describe("流式JSON部分基本值", (): void => {
+  it("部分null回退空对象，顶层非法控制字符修复后保留部分文本", (): void => {
+    deepStrictEqual(parseStreamingJson("nul"), {});
+    strictEqual(parseStreamingJson('"a\nb'), "a\nb");
+    strictEqual(parseStreamingJson('"\u0001'), "\u0001");
+  });
+});

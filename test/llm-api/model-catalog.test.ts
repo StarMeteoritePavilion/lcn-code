@@ -433,3 +433,175 @@ describe("ModelCatalog.refresh", (): void => {
     });
   }
 });
+
+describe("ModelCatalog 发布竞争", (): void => {
+  it("写入未完成时替换来源，中断旧发布并阻止 update 回调", async (): Promise<void> => {
+    const writing = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let hasUpdated = false;
+    const store: ModelsStore = {
+      async read(): Promise<undefined> {
+        return undefined;
+      },
+      async write(): Promise<void> {
+        writing.resolve();
+        await release.promise;
+      },
+      async delete(): Promise<void> {},
+    };
+    const catalog = new ModelCatalog({
+      modelsStore: store,
+      sources: [
+        {
+          id: "来源",
+          getModels(): readonly Model[] {
+            return [];
+          },
+          async refreshModels(context: ModelCatalogRefreshContext): Promise<void> {
+            await context.publish({
+              persist: { models: [] },
+              /** 检查过期持久化后不会执行模型更新。 */
+              update: (): void => {
+                hasUpdated = true;
+              },
+            });
+          },
+        },
+      ],
+    });
+    const pending = catalog.refresh();
+    await writing.promise;
+    catalog.deleteSource("来源");
+    const result = await pending;
+    release.resolve();
+    await new Promise<void>((resolve: () => void): void => {
+      setImmediate(resolve);
+    });
+    strictEqual(result.errors.size, 0);
+    strictEqual(hasUpdated, false);
+  });
+
+  it("同一来源并行发布保持顺序，前次失败不会阻止后次发布", async (): Promise<void> => {
+    const order: string[] = [];
+    const catalog = new ModelCatalog({
+      sources: [
+        {
+          id: "来源",
+          getModels(): readonly Model[] {
+            return [];
+          },
+          async refreshModels(context: ModelCatalogRefreshContext): Promise<void> {
+            const first = context.publish({
+              /** 制造首个更新失败以验证发布队列恢复。 */
+              update: (): void => {
+                order.push("首次");
+                throw new Error("首次失败");
+              },
+            });
+            const second = context.publish({
+              /** 记录失败后仍执行的更新。 */
+              update: (): void => {
+                order.push("后次");
+              },
+            });
+            await rejects(first, /首次失败/);
+            strictEqual(await second, true);
+          },
+        },
+      ],
+    });
+    const result = await catalog.refresh();
+    strictEqual(result.errors.size, 0);
+    deepStrictEqual(order, ["首次", "后次"]);
+  });
+});
+
+describe("ModelCatalog 刷新启动错误", (): void => {
+  it("来源 ID 在注册后读取失败时 refresh 拒绝原错误", async (): Promise<void> => {
+    const error = new Error("来源 ID 在刷新时无法读取");
+    let shouldThrow = false;
+    const source: ModelCatalogSource = {
+      get id(): string {
+        if (shouldThrow) {
+          throw error;
+        }
+        return "来源";
+      },
+      getModels(): readonly Model[] {
+        return [];
+      },
+      async refreshModels(): Promise<void> {},
+    };
+    const catalog = new ModelCatalog({ sources: [source] });
+    shouldThrow = true;
+    await rejects(catalog.refresh(), error);
+  });
+});
+
+describe("ModelCatalog 空中断原因与延迟拒绝", (): void => {
+  it("abort(null) 终止刷新，后续发布返回默认中断错误", async (): Promise<void> => {
+    const started = Promise.withResolvers<ModelCatalogRefreshContext>();
+    const release = Promise.withResolvers<void>();
+    const controller = new AbortController();
+    const catalog = new ModelCatalog({
+      sources: [
+        {
+          id: "来源",
+          getModels(): readonly Model[] {
+            return [];
+          },
+          async refreshModels(context: ModelCatalogRefreshContext): Promise<void> {
+            started.resolve(context);
+            await release.promise;
+          },
+        },
+      ],
+    });
+    const pending = catalog.refresh({ signal: controller.signal });
+    const context = await started.promise;
+    controller.abort(null);
+    const result = await pending;
+    strictEqual(result.aborted, true);
+    strictEqual(result.errors.size, 0);
+    strictEqual(context.signal.reason, null);
+    await rejects(context.publish({ persist: { models: [] } }), /The operation was aborted/);
+    release.resolve();
+  });
+
+  it("读取时同步中断后底层 Promise 延迟拒绝，不产生未处理拒绝", async (): Promise<void> => {
+    const controller = new AbortController();
+    const readResult = Promise.withResolvers<undefined>();
+    let hasRefreshed = false;
+    const store: ModelsStore = {
+      read(): Promise<undefined> {
+        controller.abort(null);
+        return readResult.promise;
+      },
+      async write(): Promise<void> {},
+      async delete(): Promise<void> {},
+    };
+    const catalog = new ModelCatalog({
+      modelsStore: store,
+      sources: [
+        {
+          id: "来源",
+          getModels(): readonly Model[] {
+            return [];
+          },
+          async refreshModels(): Promise<void> {
+            hasRefreshed = true;
+          },
+        },
+      ],
+    });
+    const result = await catalog.refresh({ signal: controller.signal });
+    strictEqual(result.aborted, true);
+    strictEqual(result.errors.size, 0);
+    readResult.reject(new Error("中断后的底层读取失败"));
+    await new Promise<void>((resolve: () => void): void => {
+      setImmediate(resolve);
+    });
+    strictEqual(hasRefreshed, false);
+    strictEqual(result.errors.size, 0);
+  });
+});

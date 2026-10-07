@@ -1,5 +1,7 @@
 import { deepStrictEqual, ok, rejects, strictEqual } from "node:assert";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
@@ -115,7 +117,7 @@ describe("main：代理循环演示入口", (): void => {
 interface Call {
   id: string;
   name: string;
-  arguments: { value: number };
+  arguments: { value: number | string };
 }
 
 /**
@@ -323,10 +325,12 @@ function config(
 /**
  * 将离线模型配置写入临时目录，通过公开 main 入口运行代理场景。
  * @param config - 包含离线传输和明确模型声明的配置。
+ * @param image - 可选的 JPEG 字节，仅在图片场景中写入临时目录。
  * @returns 公开入口的场景统计；临时目录在结束后删除。
  */
 async function runConfiguredDemo(
   config: ResolvedAiConfig,
+  image?: Uint8Array,
 ): Promise<Awaited<ReturnType<typeof main>>> {
   const prefix = join(tmpdir(), "lcn-agent-scenarios-");
   const directory = await mkdtemp(prefix);
@@ -347,6 +351,10 @@ async function runConfiguredDemo(
   };
   try {
     await writeFile(join(directory, "settings.json"), JSON.stringify(settings));
+    if (image) {
+      await mkdir(join(directory, "docs"));
+      await writeFile(join(directory, "docs", "logo.jpg"), image);
+    }
     return await main(directory, fetch);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -408,5 +416,265 @@ describe("main：代理功能场景", (): void => {
     silence(context);
     const summary = await runConfiguredDemo(config("anthropic-messages", [], true));
     deepStrictEqual(summary, { passed: 0, failed: 13, skipped: 2 });
+  });
+});
+
+describe("main：图片、推理与请求边界", (): void => {
+  it("JPEG 图片能力发送实际图片内容并通过图片场景", async (context: TestContext): Promise<void> => {
+    silence(context);
+    const captured: Record<string, unknown>[] = [];
+    const settings = config("openai-completions", captured);
+    settings.model.input = ["text", "image"];
+    const image = await readFile(new URL("../../../docs/logo.jpg", import.meta.url));
+    const summary = await runConfiguredDemo(settings, image);
+    deepStrictEqual(summary, { passed: 14, failed: 0, skipped: 1 });
+    const imageRequests = captured.filter((body: Record<string, unknown>): boolean =>
+      JSON.stringify(body.messages).includes("data:image/jpeg;base64,"),
+    );
+    strictEqual(imageRequests.length, 1);
+    ok(JSON.stringify(imageRequests[0]).includes(image.toString("base64")));
+  });
+
+  for (const isAdaptive of [false, true]) {
+    it(`Anthropic ${isAdaptive ? "自适应" : "预算"}思考设置进入请求，缺少推理证据仍判为失败`, async (context: TestContext): Promise<void> => {
+      silence(context);
+      const captured: Record<string, unknown>[] = [];
+      const settings = config("anthropic-messages", captured);
+      settings.model.reasoning = true;
+      settings.model.maxTokens = 16384;
+      settings.options.maxTokens = 4096;
+      settings.model.compat = {
+        supportsMidConvoSystemMessages: true,
+        supportsMidConvoToolChanges: true,
+        forceAdaptiveThinking: isAdaptive,
+      };
+      if (isAdaptive) {
+        settings.model.thinkingLevelMap = { high: "medium" };
+      }
+      const summary = await runConfiguredDemo(settings);
+      deepStrictEqual(summary, { passed: 13, failed: 1, skipped: 1 });
+      const request = captured.at(-1);
+      if (isAdaptive) {
+        deepStrictEqual(request?.thinking, { type: "adaptive", display: "summarized" });
+        deepStrictEqual(request?.output_config, { effort: "medium" });
+      } else {
+        const thinking = request?.thinking as { type: string; budget_tokens: number };
+        strictEqual(thinking.type, "enabled");
+        ok(thinking.budget_tokens > 0);
+        ok(Number(request?.max_tokens) > thinking.budget_tokens);
+      }
+    });
+  }
+
+  it("持续工具调用达到每场景请求上限，错误统计不依赖额外模型请求", async (context: TestContext): Promise<void> => {
+    const errors: string[] = [];
+    silence(context);
+    context.mock.method(console, "error", (message: string): void => {
+      errors.push(message);
+    });
+    const settings = config("anthropic-messages", []);
+    let requests = 0;
+    /**
+     * 持续返回工具调用，使场景达到内置请求上限。
+     * @returns 离线工具调用响应。
+     */
+    settings.options.fetch = async (): Promise<Response> => {
+      requests++;
+      return response("anthropic-messages", [
+        { id: "endless", name: "demo_echo", arguments: { value: 10 } },
+      ]);
+    };
+    const summary = await runConfiguredDemo(settings);
+    ok(summary.failed > 0);
+    strictEqual(summary.passed + summary.failed + summary.skipped, 15);
+    ok(errors.some((message: string): boolean => message.includes("场景超过 4 次请求上限")));
+    ok(requests <= 13 * 4);
+  });
+
+  it("无法转换的工具参数跳过执行并记录场景失败", async (context: TestContext): Promise<void> => {
+    silence(context);
+    const settings = config("anthropic-messages", []);
+    /**
+     * 返回无法通过数字模式校验的参数。
+     * @returns 含异常工具参数的离线响应。
+     */
+    settings.options.fetch = async (): Promise<Response> =>
+      response("anthropic-messages", [
+        { id: "invalid", name: "demo_echo", arguments: { value: "不可转数字" } },
+      ]);
+    const summary = await runConfiguredDemo(settings);
+    ok(summary.failed > 0);
+    strictEqual(summary.passed + summary.failed + summary.skipped, 15);
+  });
+});
+
+describe("main：场景之间的取消与直接入口", (): void => {
+  it("完成首个场景后收到 SIGINT，下一场景不发起请求且移除监听器", async (context: TestContext): Promise<void> => {
+    silence(context);
+    const captured: Record<string, unknown>[] = [];
+    context.mock.method(console, "log", (message?: string): void => {
+      if (message?.startsWith("agent-loop / 入口与继续：")) {
+        process.emit("SIGINT");
+      }
+    });
+    const listeners = process.listenerCount("SIGINT");
+    await rejects(runConfiguredDemo(config("anthropic-messages", captured)), /代理循环演示已中断/);
+    strictEqual(captured.length, 2);
+    strictEqual(process.listenerCount("SIGINT"), listeners);
+  });
+
+  it("直接启动时配置缺失输出失败原因并以非零退出码收尾", async (): Promise<void> => {
+    const prefix = join(tmpdir(), "lcn-agent-cli-");
+    const directory = await mkdtemp(prefix);
+    const entryPath = fileURLToPath(new URL("../src/main.js", import.meta.url));
+    try {
+      const result = spawnSync(process.execPath, [entryPath], {
+        cwd: directory,
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      strictEqual(result.error, undefined);
+      strictEqual(result.signal, null);
+      strictEqual(result.status, 1);
+      ok(result.stderr.includes("运行失败："));
+      ok(result.stderr.includes("provider"));
+      strictEqual(result.stdout, "");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("main：直接入口的场景失败收尾", (): void => {
+  it("离线模型请求全部失败时打印统计并设置非零退出码", async (): Promise<void> => {
+    await withDemo(async (directory: string): Promise<void> => {
+      const entryPath = fileURLToPath(new URL("../src/main.js", import.meta.url));
+      const preloadPath = join(directory, "offline-fetch.mjs");
+      await writeFile(
+        preloadPath,
+        'globalThis.fetch = async () => new Response("离线请求失败", { status: 500 });',
+      );
+      const result = spawnSync(process.execPath, ["--import", preloadPath, entryPath], {
+        cwd: directory,
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      strictEqual(result.error, undefined);
+      strictEqual(result.signal, null);
+      strictEqual(result.status, 1);
+      ok(result.stdout.includes("成功 0，失败 13，跳过 2"));
+      strictEqual(result.stderr.includes("运行失败："), false);
+      ok(result.stderr.includes("离线请求失败"));
+    });
+  });
+});
+
+describe("main：自适应推理级别回退", (): void => {
+  it("high 被禁用时选择 minimal，并将自适应 effort 映射为 low", async (context: TestContext): Promise<void> => {
+    silence(context);
+    const captured: Record<string, unknown>[] = [];
+    const settings = config("anthropic-messages", captured);
+    settings.model.reasoning = true;
+    settings.model.thinkingLevelMap = { high: null };
+    settings.model.compat = {
+      supportsMidConvoSystemMessages: true,
+      supportsMidConvoToolChanges: true,
+      forceAdaptiveThinking: true,
+    };
+    const summary = await runConfiguredDemo(settings);
+    deepStrictEqual(summary, { passed: 13, failed: 1, skipped: 1 });
+    deepStrictEqual(captured.at(-1)?.output_config, { effort: "low" });
+    deepStrictEqual(captured.at(-1)?.thinking, { type: "adaptive", display: "summarized" });
+  });
+});
+
+describe("main：可见思考内容", (): void => {
+  it("自适应思考没有自定义映射时沿用 high，可见思考块满足推理证据", async (context: TestContext): Promise<void> => {
+    silence(context);
+    const captured: Record<string, unknown>[] = [];
+    const settings = config("anthropic-messages", captured);
+    settings.model.reasoning = true;
+    settings.model.compat = {
+      supportsMidConvoSystemMessages: true,
+      supportsMidConvoToolChanges: true,
+      forceAdaptiveThinking: true,
+    };
+    const originalFetch = settings.options.fetch;
+    ok(originalFetch);
+    /**
+     * 在推理请求的离线响应中追加可见思考内容块。
+     * @param input - 当前请求地址。
+     * @param init - 当前请求选项。
+     * @returns 包含真实协议思考事件的离线回复。
+     */
+    settings.options.fetch = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const original = await originalFetch(input, init);
+      if (!captured.at(-1)?.thinking) {
+        return original;
+      }
+      const text = await original.text();
+      const thinkingEvents = [
+        {
+          type: "content_block_start",
+          index: 1,
+          content_block: { type: "thinking", thinking: "" },
+        },
+        {
+          type: "content_block_delta",
+          index: 1,
+          delta: { type: "thinking_delta", thinking: "计算余数。" },
+        },
+        { type: "content_block_stop", index: 1 },
+      ];
+      const blocks = thinkingEvents.map(
+        (event: Record<string, unknown>): string =>
+          `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+      );
+      return new Response(
+        text.replace("event: message_delta", `${blocks.join("")}event: message_delta`),
+        {
+          headers: { "Content-Type": "text/event-stream" },
+        },
+      );
+    };
+    const summary = await runConfiguredDemo(settings);
+    deepStrictEqual(summary, { passed: 14, failed: 0, skipped: 1 });
+    deepStrictEqual(captured.at(-1)?.output_config, { effort: "high" });
+  });
+});
+
+describe("main：无入口路径的模块导入", (): void => {
+  it("Node 模块求值导入时没有 argv[1]，不加载配置或发送模型请求", async (): Promise<void> => {
+    const prefix = join(tmpdir(), "lcn-agent-module-");
+    const directory = await mkdtemp(prefix);
+    const entryUrl = new URL("../src/main.js", import.meta.url).href;
+    const script = `
+      import { strictEqual } from "node:assert";
+      strictEqual(process.argv[1], undefined);
+      let requests = 0;
+      globalThis.fetch = async () => {
+        requests++;
+        throw new Error("导入不应请求模型");
+      };
+      await import(${JSON.stringify(entryUrl)});
+      strictEqual(requests, 0);
+    `;
+    try {
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+        cwd: directory,
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      strictEqual(result.error, undefined);
+      strictEqual(result.signal, null);
+      strictEqual(result.status, 0);
+      strictEqual(result.stdout, "");
+      strictEqual(result.stderr, "");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

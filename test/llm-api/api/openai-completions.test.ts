@@ -719,3 +719,183 @@ describe("Completions 入口与解析模块协作", (): void => {
     deepStrictEqual(calls, ["首次", "替换", "替换"]);
   });
 });
+
+describe("Completions 端点错误终态", (): void => {
+  it("内容过滤及端点网络停止保留正文并只发送一个错误事件", async (): Promise<void> => {
+    for (const rawStopReason of ["content_filter", "network_error"]) {
+      const events = protocolEvents("openai-completions");
+      const terminal = events[2];
+      ok(terminal);
+      terminal.choices = [{ delta: {}, finish_reason: rawStopReason }];
+      const result = await collectStream(
+        stream(testModel("openai-completions"), normalizeContext({ messages: [] }), {
+          apiKey: "test-key",
+          fetch: async (): Promise<Response> => eventResponse(events),
+        }),
+      );
+      strictEqual(result.message.stopReason, "error");
+      strictEqual(result.message.errorMessage, `Endpoint finish_reason: ${rawStopReason}`);
+      deepStrictEqual(result.message.content, [{ type: "text", text: "你好" }]);
+      strictEqual(
+        result.events.filter((event: AssistantMessageEvent): boolean => event.type === "error")
+          .length,
+        1,
+      );
+      strictEqual(
+        result.events.some((event: AssistantMessageEvent): boolean => event.type === "done"),
+        false,
+      );
+    }
+  });
+});
+
+describe("openai-completions 简化选项边界", (): void => {
+  it("非推理模型简化请求省略推理配置，终态回调中取消保留正文", async (): Promise<void> => {
+    const model = { ...testModel("openai-completions"), reasoning: false };
+    let payload: Record<string, unknown> | undefined;
+    const result = await collectStream(
+      streamSimple(model, normalizeContext({ messages: [] }), {
+        apiKey: "test-key",
+        reasoning: "high",
+        onPayload: (value: unknown): void => {
+          payload = value as Record<string, unknown>;
+        },
+        fetch: async (): Promise<Response> => eventResponse(protocolEvents(model.api)),
+      }),
+    );
+    strictEqual(result.message.stopReason, "stop");
+    strictEqual(payload?.reasoning, undefined);
+    strictEqual(payload?.reasoning_effort, undefined);
+    const controller = new AbortController();
+    const aborted = await collectStream(
+      stream(model, normalizeContext({ messages: [] }), {
+        apiKey: "test-key",
+        signal: controller.signal,
+        fetch: async (): Promise<Response> => eventResponse(protocolEvents(model.api)),
+        onStreamEvent: (value: unknown): void => {
+          const event = value as Record<string, unknown>;
+          if (
+            Array.isArray(event.choices) &&
+            (event.choices[0] as Record<string, unknown> | undefined)?.finish_reason
+          ) {
+            controller.abort();
+          }
+        },
+      }),
+    );
+    strictEqual(aborted.message.stopReason, "aborted");
+    strictEqual(aborted.events.at(-1)?.type, "error");
+    ok(aborted.message.content.length > 0);
+  });
+});
+
+describe("Completions 会话亲和头分支", (): void => {
+  it("OpenAI 与默认格式分别写入会话头，关闭缓存不发送会话亲和", async (): Promise<void> => {
+    for (const sessionAffinityFormat of ["openai", "openai-nosession"] as const) {
+      const model = {
+        ...testModel("openai-completions"),
+        compat: { sendSessionAffinityHeaders: true, sessionAffinityFormat },
+      };
+      for (const cacheRetention of ["short", "none"] as const) {
+        let headers: Headers | undefined;
+        await collectStream(
+          stream(model, normalizeContext({ messages: [] }), {
+            apiKey: "test-key",
+            cacheRetention,
+            sessionId: "session-test",
+            fetch: async (
+              _input: string | URL | Request,
+              init?: RequestInit,
+            ): Promise<Response> => {
+              headers = new Headers(init?.headers);
+              return eventResponse(protocolEvents(model.api));
+            },
+          }),
+        );
+        strictEqual(
+          headers?.get("x-client-request-id"),
+          cacheRetention === "short" ? "session-test" : null,
+        );
+        strictEqual(
+          headers?.get("x-session-affinity"),
+          cacheRetention === "short" ? "session-test" : null,
+        );
+        strictEqual(
+          headers?.get("session_id"),
+          cacheRetention === "short" && sessionAffinityFormat === "openai" ? "session-test" : null,
+        );
+      }
+    }
+  });
+});
+
+describe("Completions 服务商默认兼容", (): void => {
+  it("已知服务商默认字段可在离线请求中观察", async (): Promise<void> => {
+    const cases = [
+      {
+        baseUrl: "https://deepseek.com/v1",
+        id: "model",
+        field: "max_tokens",
+        thinking: { type: "enabled" },
+      },
+      {
+        baseUrl: "https://api.z.ai/v1",
+        id: "model",
+        field: "max_tokens",
+        thinking: { type: "enabled", clear_thinking: false },
+      },
+      {
+        baseUrl: "https://api.together.ai/v1",
+        id: "model",
+        field: "max_tokens",
+        reasoning: { enabled: true },
+      },
+      {
+        baseUrl: "https://api.ant-ling.com/v1",
+        id: "model",
+        field: "max_tokens",
+        reasoning: { effort: "mapped" },
+      },
+      {
+        baseUrl: "https://openrouter.ai/api/v1",
+        id: "anthropic/model",
+        field: "max_completion_tokens",
+        reasoning: { effort: "mapped" },
+      },
+      {
+        baseUrl: "https://openrouter.ai/api/v1",
+        id: "openai/model",
+        field: "max_completion_tokens",
+        reasoning: { effort: "mapped" },
+      },
+    ];
+    for (const entry of cases) {
+      const model = {
+        ...testModel("openai-completions"),
+        baseUrl: entry.baseUrl,
+        id: entry.id,
+        reasoning: true,
+        thinkingLevelMap: { high: "mapped" },
+      };
+      let payload: Record<string, unknown> | undefined;
+      const result = await collectStream(
+        stream(model, normalizeContext({ systemPrompt: "规则", messages: [] }), {
+          apiKey: "test-key",
+          maxTokens: 1234,
+          reasoningEffort: "high",
+          cacheRetention: "short",
+          sessionId: "session-test",
+          timeoutMs: 1000,
+          onPayload: (value: unknown): void => {
+            payload = value as Record<string, unknown>;
+          },
+          fetch: async (): Promise<Response> => eventResponse(protocolEvents(model.api)),
+        }),
+      );
+      strictEqual(result.message.stopReason, "stop");
+      strictEqual(payload?.[entry.field], 1234);
+      deepStrictEqual(payload?.thinking, entry.thinking);
+      deepStrictEqual(payload?.reasoning, entry.reasoning);
+    }
+  });
+});
