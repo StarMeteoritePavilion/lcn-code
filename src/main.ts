@@ -34,6 +34,7 @@ import {
   runAgentLoopContinue,
   runToolCall,
 } from "./agent-loop/agent-loop.ts";
+import { Agent } from "./agent-loop/agent.ts";
 import type {
   AgentContext,
   AgentEvent,
@@ -398,6 +399,13 @@ function checkResponse(run: DemoRun, messages: AgentMessage[]): void {
   }
 }
 
+/**
+ * 核对双工具批次的结果顺序、轮次结果和实际并发数量。
+ * @param run - 当前场景的运行记录。
+ * @param messages - 本次循环返回的新增消息。
+ * @param maxActive - 预期同时执行的工具数量。
+ * @throws 工具数量、结果顺序、完成事件或并发数量不符合预期时抛出断言错误。
+ */
 function checkBatch(run: DemoRun, messages: AgentMessage[], maxActive: number): void {
   const { assistants, results } = responseMessages(run, messages);
   const calls =
@@ -421,6 +429,15 @@ function checkBatch(run: DemoRun, messages: AgentMessage[], maxActive: number): 
     )
     .map((event: Extract<AgentEvent, { type: "tool_execution_end" }>): string => event.toolCallId);
   deepStrictEqual(endIds, run.trace.ends);
+  const turnResultIds = run.trace.events.flatMap((event: AgentEvent): string[] => {
+    if (event.type !== "turn_end") {
+      return [];
+    }
+    return event.toolResults.map(
+      (result: Extract<AgentMessage, { role: "toolResult" }>): string => result.toolCallId,
+    );
+  });
+  deepStrictEqual(turnResultIds, resultIds, "轮次工具结果没有保持原始调用顺序。");
 }
 
 function reportScenario(name: string, run: DemoRun, messages: AgentMessage[]): void {
@@ -446,28 +463,65 @@ async function runPrompt(
   return messages;
 }
 
-// 验证直接入口及已有上下文的继续运行。
+/**
+ * 通过有状态代理验证提示、排队续跑、空闲等待和重置。
+ * @param config - 当前模型及原生请求配置。
+ * @param signal - 整个演示的取消信号。
+ * @returns 两次请求及状态断言完成。
+ * @throws 模型响应失败或状态不符合预期时拒绝。
+ */
 async function demoEntryAndContinue(config: ResolvedAiConfig, signal: AbortSignal): Promise<void> {
   const run = createDemoRun(config, signal);
-  const messages = await runPrompt(run);
-  const continuation = {
-    ...run.context,
-    messages: [...run.context.messages, ...messages, userMessage("请回复继续完成。")],
-  };
-  const more = await runAgentLoopContinue(
-    continuation,
-    run.loopConfig,
-    run.emit,
-    run.signal,
-    run.streamFn,
-  );
-  messages.push(...more);
+  const agent = new Agent({
+    initialState: { messages: run.context.messages, model: config.model },
+    apiKey: config.options.apiKey,
+    /**
+     * 合并代理取消信号和演示运行限制后请求模型。
+     * @param model - 当前模型。
+     * @param context - 模型请求上下文。
+     * @param options - 当前代理请求选项。
+     * @returns 模型响应事件流。
+     */
+    streamFn: (
+      model: Model<Api>,
+      context: TranscriptContext,
+      options?: SimpleStreamOptions,
+    ): AssistantMessageEventStream => {
+      const signals = options?.signal ? [run.signal, options.signal] : [run.signal];
+      const requestSignal = AbortSignal.any(signals);
+      return run.streamFn(model, context, {
+        ...options,
+        apiKey: config.options.apiKey,
+        signal: requestSignal,
+      });
+    },
+  });
+  agent.subscribe(run.emit);
+  await agent.prompt("只回复一句中文问候。");
+  checkResponse(run, agent.state.messages.slice(1));
+  strictEqual(agent.state.isStreaming, false);
+  agent.followUp(userMessage("请回复继续完成。"));
+  strictEqual(agent.hasQueuedMessages(), true);
+  await agent.continue();
+  await agent.waitForIdle();
+  strictEqual(agent.hasQueuedMessages(), false);
+  const messages = agent.state.messages.slice(1);
   checkResponse(run, messages);
   strictEqual(run.trace.requests, 2);
+  agent.reset();
+  strictEqual(agent.state.messages.length, 1);
+  strictEqual(agent.signal, undefined);
   reportScenario("入口与继续", run, messages);
 }
 
-// 验证事件流入口及事件流续跑。
+/**
+ * 消费事件流并展示文本增量，验证生命周期顺序后继续已有对话。
+ * @param config - 当前模型及原生请求配置。
+ * @param signal - 整个演示的取消信号。
+ * @returns 两次事件流请求及生命周期断言完成。
+ * @throws 模型请求失败、缺少流式更新或生命周期顺序不正确时拒绝。
+ * @remarks 文本增量直接写入标准输出。
+ */
 async function demoEventStream(config: ResolvedAiConfig, signal: AbortSignal): Promise<void> {
   const run = createDemoRun(config, signal);
   const events = agentLoop(
@@ -479,9 +533,28 @@ async function demoEventStream(config: ResolvedAiConfig, signal: AbortSignal): P
   );
   for await (const event of events) {
     run.emit(event);
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      process.stdout.write(event.assistantMessageEvent.delta);
+    }
   }
+  console.log();
   const messages = await events.result();
   checkResponse(run, messages);
+  const eventTypes = run.trace.events.map((event: AgentEvent): AgentEvent["type"] => event.type);
+  for (const type of [
+    "agent_start",
+    "turn_start",
+    "message_start",
+    "message_update",
+    "message_end",
+    "turn_end",
+    "agent_end",
+  ] as const) {
+    ok(eventTypes.includes(type), `缺少 ${type} 事件。`);
+  }
+  ok(eventTypes.indexOf("agent_start") < eventTypes.indexOf("message_start"));
+  ok(eventTypes.indexOf("message_start") < eventTypes.indexOf("message_end"));
+  ok(eventTypes.indexOf("message_end") < eventTypes.lastIndexOf("agent_end"));
   const continuation = {
     ...run.context,
     messages: [...run.context.messages, ...messages, userMessage("请回复事件流继续完成。")],
@@ -489,7 +562,11 @@ async function demoEventStream(config: ResolvedAiConfig, signal: AbortSignal): P
   const continued = agentLoopContinue(continuation, run.loopConfig, run.signal, run.streamFn);
   for await (const event of continued) {
     run.emit(event);
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      process.stdout.write(event.assistantMessageEvent.delta);
+    }
   }
+  console.log();
   messages.push(...(await continued.result()));
   checkResponse(run, messages);
   strictEqual(run.trace.requests, 2);
@@ -581,6 +658,7 @@ async function demoToolHooksAndNested(
    */
   run.loopConfig.beforeToolCall = async (call: BeforeToolCallContext): Promise<undefined> => {
     checkPreparedArguments(run.trace, call);
+    ok(call.context.messages.includes(call.assistantMessage), "工具预检早于助手消息提交。");
     run.activeContext = call.context;
     return undefined;
   };
@@ -607,6 +685,9 @@ async function demoToolHooksAndNested(
   strictEqual(run.trace.nested, 1);
   strictEqual(run.trace.before, 2);
   strictEqual(run.trace.after, 2);
+  const { results } = responseMessages(run, messages);
+  strictEqual(results.length, 1, "嵌套工具结果不应独立进入对话记录。");
+  deepStrictEqual(results[0]?.content, [{ type: "text", text: "钩子覆盖后的结果 99。" }]);
   ok(run.trace.events.some((event: AgentEvent): boolean => event.type === "tool_execution_update"));
   const event = run.trace.events.find(
     (item: AgentEvent): item is Extract<AgentEvent, { type: "tool_execution_end" }> =>
@@ -697,6 +778,11 @@ async function demoAllToolsTerminate(config: ResolvedAiConfig, signal: AbortSign
   const messages = await runPrompt(run, userMessage(BATCH_PROMPT));
   checkBatch(run, messages, 2);
   strictEqual(run.trace.requests, 1);
+  strictEqual(messages.at(-1)?.role, "toolResult", "全部终止后仍生成了助手响应。");
+  const { results } = responseMessages(run, messages);
+  for (const result of results) {
+    strictEqual(Object.hasOwn(result, "terminate"), false, "运行时终止提示进入了对话记录。");
+  }
   reportScenario("全部工具终止", run, messages);
 }
 
@@ -717,6 +803,7 @@ async function demoRequestAndTurnScheduling(
    * @returns 模型、上下文和推理级别的完整替换值。
    */
   run.loopConfig.prepareRequest = (request: PrepareRequestContext): AgentRequestUpdate => {
+    strictEqual(run.trace.events.at(-1)?.type, "message_end", "请求准备早于输入消息提交。");
     run.trace.order.push("prepareRequest");
     run.activeContext = {
       ...request.context,
@@ -767,6 +854,7 @@ async function demoRequestAndTurnScheduling(
   run.loopConfig.finishTurn = (turn: AgentTurnContext): AgentTurnDecision => {
     run.trace.order.push("finishTurn");
     ok(turn.newMessages.includes(turn.message), "轮次消息未进入新增消息。");
+    strictEqual(run.trace.events.at(-1)?.type, "message_end", "轮次决策晚于 turn_end。");
     return { action: run.trace.requests === 1 ? "continue" : "end" };
   };
   /**
@@ -774,6 +862,7 @@ async function demoRequestAndTurnScheduling(
    * @returns 新消息及下一轮模型。
    */
   run.loopConfig.prepareNextTurn = (): AgentLoopTurnUpdate => {
+    strictEqual(run.trace.events.at(-1)?.type, "turn_end", "下一轮准备早于 turn_end。");
     run.trace.order.push("prepareNextTurn");
     return { messages: [userMessage("请回复：调度已继续。")], model: config.model };
   };
@@ -817,6 +906,13 @@ async function demoRequestAndTurnScheduling(
     ]);
   }
   strictEqual(run.trace.requests, 2);
+  ok(
+    !messages.some(
+      (message: AgentMessage): boolean =>
+        message.role === "system" && message.content === "转换前临时标记。",
+    ),
+    "临时上下文变换进入了最终新增消息。",
+  );
   strictEqual(
     run.trace.order.filter((step: string): boolean => step === "prepareNextTurn").length,
     1,
@@ -872,6 +968,16 @@ async function demoSteeringAndFollowUp(
     (message: AgentMessage): boolean => message.role === "toolResult",
   );
   ok(steeringIndex > resultIndex, "引导消息早于工具结果。");
+  const followUpIndex = messages.findIndex(
+    (message: AgentMessage): boolean =>
+      message.role === "user" && message.content === "后续消息：请回复演示完成，不再使用工具。",
+  );
+  ok(followUpIndex > steeringIndex, "后续消息早于引导消息。");
+  const between = messages.slice(steeringIndex + 1, followUpIndex);
+  ok(
+    between.some((message: AgentMessage): boolean => message.role === "assistant"),
+    "引导响应尚未结束就注入了后续消息。",
+  );
   reportScenario("引导与后续消息", run, messages);
 }
 
@@ -912,6 +1018,13 @@ async function demoDynamicTools(config: ResolvedAiConfig, signal: AbortSignal): 
     delta.toolsAdded?.map((tool: { name: string }): string => tool.name),
     ["replacement_echo"],
   );
+  const removals = messages.filter(
+    (message: AgentMessage): boolean => message.role === "system" && !!message.toolsRemoved?.length,
+  );
+  strictEqual(removals.length, 1, "工具未变化的下一轮重复发送了移除声明。");
+  for (const declaration of delta.toolsAdded ?? []) {
+    strictEqual(Object.hasOwn(declaration, "execute"), false, "工具声明包含执行函数。");
+  }
   reportScenario("工具动态替换", run, messages);
 }
 
@@ -947,6 +1060,10 @@ async function demoAbortDuringResponse(
   const { assistants } = responseMessages(run, messages);
   ok(run.cancellation.signal.aborted, "未在响应过程中执行取消。");
   strictEqual(assistants.at(-1)?.stopReason, "aborted");
+  strictEqual(run.trace.requests, 1, "取消后仍继续请求模型。");
+  const endingEvents = run.trace.events.slice(-2);
+  const endingTypes = endingEvents.map((event: AgentEvent): string => event.type);
+  deepStrictEqual(endingTypes, ["turn_end", "agent_end"]);
   console.log(`agent-loop / 响应中取消：请求 ${run.trace.requests}，已收到 aborted 结束事件。`);
 }
 

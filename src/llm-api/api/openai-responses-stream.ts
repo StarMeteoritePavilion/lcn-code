@@ -259,7 +259,7 @@ export async function processResponsesStream(
         ...(item.namespace !== undefined ? { namespace: item.namespace } : {}),
         customInput: {
           property: inputProperty,
-          jsonBuffer: { input: "", started: false, closed: false },
+          jsonBuffer: { input: "", isStarted: false, isClosed: false },
         },
       };
       output.content.push(block);

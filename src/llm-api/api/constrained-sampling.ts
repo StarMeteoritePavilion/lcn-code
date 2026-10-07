@@ -197,8 +197,8 @@ export interface GrammarConstrainedSampling {
 
 export interface GrammarToolInputJsonBuffer {
   input: string;
-  started: boolean;
-  closed: boolean;
+  isStarted: boolean;
+  isClosed: boolean;
 }
 
 /**
@@ -238,7 +238,7 @@ export function appendGrammarToolInputJsonDelta(
   nextInput: string,
   shouldClose: boolean,
 ): string | undefined {
-  if (buffer.closed) {
+  if (buffer.isClosed) {
     if (shouldClose && nextInput === buffer.input) {
       return undefined;
     }
@@ -256,16 +256,16 @@ export function appendGrammarToolInputJsonDelta(
   }
 
   let delta = "";
-  if (!buffer.started) {
+  if (!buffer.isStarted) {
     delta += `{${JSON.stringify(inputProperty)}:"`;
-    buffer.started = true;
+    buffer.isStarted = true;
   }
   delta += JSON.stringify(inputDelta).slice(1, -1);
   buffer.input = nextInput;
 
   if (shouldClose) {
     delta += '"}';
-    buffer.closed = true;
+    buffer.isClosed = true;
   }
   return delta;
 }

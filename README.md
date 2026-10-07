@@ -84,6 +84,8 @@ lcn-code/
 
 `main` 显式调用各场景的方法，例如 `demoEntryAndContinue`、`demoParallelTools`、`demoToolHooksAndNested`；每个方法独立设置对应钩子并验证结果。共用部分负责请求适配、内存工具、事件记录和统计。
 
+入口与继续场景通过有状态的 `Agent` 验证提示、排队续跑、空闲等待和重置；事件流场景输出文本增量并断言生命周期事件顺序。`Agent` 的构造、状态、队列和错误处理见 [Agent 使用说明](docs/agent.md)。
+
 每个场景最多四次模型请求、限时六十秒且不自动重试。演示断言实际工具调用与事件；例如模型没有在同一响应中返回两个调用时，并行验证会失败。图片和推理按配置声明执行；仅声明图片输入能力时读取 JPEG 格式的 `docs/logo.jpg`。工具只在内存中计算，结束时输出成功、失败和跳过数量；场景失败时退出码为 1，按 Ctrl+C 中断整个演示。
 
 推理场景优先使用模型声明支持的 `high`，发送需要计算的问题；响应包含思考块或正数推理用量才算通过，避免把不公开思考内容的响应误判为失败。
@@ -103,6 +105,7 @@ npm run test:coverage
 
 ## 接口与配置文档
 
+- [Agent 使用说明](docs/agent.md)
 - [Anthropic Messages 配置](docs/anthropic-messages.config.md)
 - [OpenAI Completions 配置](docs/openai-completions.config.md)
 - [OpenAI Responses 配置](docs/openai-responses.config.md)

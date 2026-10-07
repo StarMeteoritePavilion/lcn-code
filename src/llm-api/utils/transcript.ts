@@ -326,7 +326,7 @@ export interface TranscriptTools {
   /**
    * 后续系统消息是否携带 toolsAdded 作为原位增量。为 false 时，requestTools 已包含全部当前工具。
    */
-  anchorsAdditions: boolean;
+  isAnchoringAdditions: boolean;
 }
 
 /**
@@ -334,7 +334,7 @@ export interface TranscriptTools {
  *
  * @param messages - 对话消息列表。
  * @param canAnchorToolAdditions - 传输层是否支持在系统消息处原位追加工具。
- * @returns 工具分配结果：可原位追加时 `requestTools` 为开头系统消息的 `toolsAdded`（不存在时为空数组）且 `anchorsAdditions` 为 `true`；否则 `requestTools` 为当前完整工具集合且 `anchorsAdditions` 为 `false`。
+ * @returns 工具分配结果：可原位追加时 `requestTools` 为开头系统消息的 `toolsAdded`（不存在时为空数组）且 `isAnchoringAdditions` 为 `true`；否则 `requestTools` 为当前完整工具集合且 `isAnchoringAdditions` 为 `false`。
  * @remarks 原位追加仅在历史中没有工具移除或同名重复声明时可用，参见 {@link hasNonAdditiveToolChanges}。
  */
 export function resolveTranscriptTools(
@@ -346,6 +346,6 @@ export function resolveTranscriptTools(
     requestTools: shouldAnchorAdditions
       ? (getInitialSystemMessage(messages)?.toolsAdded ?? [])
       : getCurrentTools(messages),
-    anchorsAdditions: shouldAnchorAdditions,
+    isAnchoringAdditions: shouldAnchorAdditions,
   };
 }

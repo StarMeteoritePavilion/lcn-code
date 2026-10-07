@@ -327,7 +327,7 @@ for (const [name, createStream] of [
           if (isLength && isCustom) {
             deepStrictEqual((call as typeof call & { customInput: unknown }).customInput, {
               property: "input",
-              jsonBuffer: { input: "hello", started: true, closed: false },
+              jsonBuffer: { input: "hello", isStarted: true, isClosed: false },
             });
           }
           deepStrictEqual(

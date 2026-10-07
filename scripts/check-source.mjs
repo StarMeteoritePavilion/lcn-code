@@ -175,9 +175,17 @@ async function checkSourceFile(file) {
         if (!value.typeAnnotation) {
           report(value, "函数参数必须显式标注类型");
         }
+        if (
+          value.type === "Identifier" &&
+          value.typeAnnotation?.typeAnnotation.type === "TSBooleanKeyword" &&
+          !BOOLEAN_PREFIX.test(value.name)
+        ) {
+          report(value, `布尔参数 ${value.name} 必须使用表示判断的前缀`);
+        }
       }
       const isConstructor = parent?.type === "MethodDefinition" && parent.kind === "constructor";
-      if (!node.returnType && !isConstructor) {
+      const isSetter = parent?.kind === "set";
+      if (!node.returnType && !isConstructor && !isSetter) {
         report(node, "函数必须显式标注返回类型");
       }
       const declaration = functionDeclaration(node, ancestors);

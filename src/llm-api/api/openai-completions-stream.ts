@@ -237,7 +237,7 @@ export async function processCompletionsStream(
         customInput: hasCustomInput
           ? {
               property: customInputProperty,
-              jsonBuffer: { input: "", started: false, closed: false },
+              jsonBuffer: { input: "", isStarted: false, isClosed: false },
             }
           : undefined,
         streamIndex,
@@ -270,7 +270,7 @@ export async function processCompletionsStream(
       block.arguments = { [customInputProperty]: "" };
       block.customInput = {
         property: customInputProperty,
-        jsonBuffer: { input: "", started: false, closed: false },
+        jsonBuffer: { input: "", isStarted: false, isClosed: false },
       };
       delete block.partialArgs;
     }

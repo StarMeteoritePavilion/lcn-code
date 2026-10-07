@@ -40,7 +40,7 @@ type EncoderBlockState =
   | { kind: "text" | "thinking"; coveredChars: number; deltaChars: number }
   | {
       kind: "toolCall";
-      caughtUp: boolean;
+      isCaughtUp: boolean;
       catchupJson: string;
       snapshotArguments: string;
     };
@@ -48,9 +48,9 @@ type EncoderBlockState =
 type ContentEvent = Exclude<AssistantMessageEvent, { type: "start" | "done" | "error" }>;
 
 type ReducerBlockState =
-  | { kind: "text"; ended: boolean }
-  | { kind: "thinking"; ended: boolean }
-  | { kind: "toolCall"; ended: boolean; json: string };
+  | { kind: "text"; isEnded: boolean }
+  | { kind: "thinking"; isEnded: boolean }
+  | { kind: "toolCall"; isEnded: boolean; json: string };
 
 function cloneTextContent(content: TextContent): TextContent {
   return {
@@ -318,7 +318,7 @@ export class AssistantMessageFrameEncoder {
         const isCaughtUp = snapshotArguments === EMPTY_PARSED_TOOL_ARGUMENTS;
         this.startBlock(event.contentIndex, {
           kind: "toolCall",
-          caughtUp: isCaughtUp,
+          isCaughtUp,
           catchupJson: "",
           snapshotArguments: isCaughtUp ? "" : snapshotArguments,
         });
@@ -333,7 +333,7 @@ export class AssistantMessageFrameEncoder {
         if (state.kind !== "toolCall") {
           throw new Error("Unreachable tool-call encoder state");
         }
-        if (state.caughtUp) {
+        if (state.isCaughtUp) {
           return event.delta.length === 0
             ? undefined
             : { type: "toolcall_delta", contentIndex: event.contentIndex, delta: event.delta };
@@ -349,7 +349,7 @@ export class AssistantMessageFrameEncoder {
             return undefined;
           }
         }
-        state.caughtUp = true;
+        state.isCaughtUp = true;
         state.snapshotArguments = "";
         const json = state.catchupJson;
         state.catchupJson = "";
@@ -518,7 +518,7 @@ function activeBlock(
       `${frameType} frame expected ${expectedKind} block at index ${contentIndex}, found ${block.type}`,
     );
   }
-  if (state.ended) {
+  if (state.isEnded) {
     throw new Error(`${frameType} frame follows the end of block at index ${contentIndex}`);
   }
   return { block, state };
@@ -562,7 +562,7 @@ export function reduceAssistantMessageFrames(
         }
         appendBlock(message, states, frame.contentIndex, frame.content, {
           kind: "text",
-          ended: false,
+          isEnded: false,
         });
         break;
       case "text_delta": {
@@ -589,7 +589,7 @@ export function reduceAssistantMessageFrames(
         if (frame.textSignature !== undefined) {
           block.textSignature = frame.textSignature;
         }
-        state.ended = true;
+        state.isEnded = true;
         break;
       }
       case "thinking_start":
@@ -598,7 +598,7 @@ export function reduceAssistantMessageFrames(
         }
         appendBlock(message, states, frame.contentIndex, frame.content, {
           kind: "thinking",
-          ended: false,
+          isEnded: false,
         });
         break;
       case "thinking_delta": {
@@ -629,7 +629,7 @@ export function reduceAssistantMessageFrames(
         if (frame.redacted !== undefined) {
           block.redacted = frame.redacted;
         }
-        state.ended = true;
+        state.isEnded = true;
         break;
       }
       case "toolcall_start":
@@ -638,7 +638,7 @@ export function reduceAssistantMessageFrames(
         }
         appendBlock(message, states, frame.contentIndex, frame.toolCall, {
           kind: "toolCall",
-          ended: false,
+          isEnded: false,
           json: "",
         });
         break;
@@ -689,7 +689,7 @@ export function reduceAssistantMessageFrames(
         if (frame.namespace !== undefined) {
           block.namespace = frame.namespace;
         }
-        state.ended = true;
+        state.isEnded = true;
         break;
       }
     }
@@ -699,7 +699,7 @@ export function reduceAssistantMessageFrames(
     return undefined;
   }
   for (const [contentIndex, state] of states) {
-    if (state.kind !== "toolCall" || state.ended || state.json.length === 0) {
+    if (state.kind !== "toolCall" || state.isEnded || state.json.length === 0) {
       continue;
     }
     const block = message.content[contentIndex];

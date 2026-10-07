@@ -202,17 +202,17 @@ describe("resolveTranscriptTools", (): void => {
     const messages = [system("", { toolsAdded: [first] }), system("", { toolsAdded: [second] })];
     deepStrictEqual(transcript.resolveTranscriptTools(messages, true), {
       requestTools: [first],
-      anchorsAdditions: true,
+      isAnchoringAdditions: true,
     });
     deepStrictEqual(transcript.resolveTranscriptTools(messages, false), {
       requestTools: [first, second],
-      anchorsAdditions: false,
+      isAnchoringAdditions: false,
     });
   });
   it("空对话的工具列表为空", (): void => {
     deepStrictEqual(transcript.resolveTranscriptTools([], true), {
       requestTools: [],
-      anchorsAdditions: true,
+      isAnchoringAdditions: true,
     });
   });
   it("工具删除使原位追加降级为当前集合", (): void => {
@@ -222,7 +222,7 @@ describe("resolveTranscriptTools", (): void => {
     ];
     deepStrictEqual(transcript.resolveTranscriptTools(messages, true), {
       requestTools: [],
-      anchorsAdditions: false,
+      isAnchoringAdditions: false,
     });
   });
 });

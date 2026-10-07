@@ -379,10 +379,24 @@ describe("main：代理功能场景", (): void => {
   for (const api of ["anthropic-messages", "openai-completions", "openai-responses"] as const) {
     it(`${api} 离线验证代理调度与断言`, async (context: TestContext): Promise<void> => {
       silence(context);
+      const chunks: string[] = [];
+      const write = process.stdout.write;
+      context.mock.method(
+        process.stdout,
+        "write",
+        (chunk: string | Uint8Array, ...args: unknown[]): boolean => {
+          if (typeof chunk === "string") {
+            chunks.push(chunk);
+            return true;
+          }
+          return Reflect.apply(write, process.stdout, [chunk, ...args]);
+        },
+      );
       const captured: Record<string, unknown>[] = [];
       const summary = await runConfiguredDemo(config(api, captured));
       deepStrictEqual(summary, { passed: 13, failed: 0, skipped: 2 });
       ok(captured.length >= 20 && captured.length <= 35);
+      strictEqual(chunks.join(""), "离线回复。离线回复。");
     });
   }
   it("模型没有返回同批多个调用时调度场景失败", async (context: TestContext): Promise<void> => {

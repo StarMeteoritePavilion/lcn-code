@@ -842,7 +842,8 @@ function convertMessages(
     }
 
     if (msg.role === "system") {
-      const addedTools = i > 0 && transcriptTools.anchorsAdditions ? (msg.toolsAdded ?? []) : [];
+      const addedTools =
+        i > 0 && transcriptTools.isAnchoringAdditions ? (msg.toolsAdded ?? []) : [];
       if (addedTools.length > 0) {
         const toolMessage: ToolSystemMessageParam = {
           role: "system",

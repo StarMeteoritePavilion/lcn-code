@@ -1,4 +1,4 @@
-// 统一规范化提供商的 HTTP 错误对象。代理或网关返回非 2xx 响应时，SDK 可能无法将响应体合并到 error.message；原始或已解析响应体与状态码仍以 SDK 特定字段保留。仅读取 error.message 会丢失响应体，产生 403 status code (no body) 或 Unknown: UnknownError 等不透明错误。normalizeProviderError 读取 Mistral、openai、@google/genai 与 AWS Bedrock 等已知 SDK 字段结构，返回用于组装显示字符串的结构。Anthropic 或 @google/genai 已将响应体合入消息时，通过 messageCarriesBody 标记避免重复显示。
+// 统一规范化提供商的 HTTP 错误对象。代理或网关返回非 2xx 响应时，SDK 可能无法将响应体合并到 error.message；原始或已解析响应体与状态码仍以 SDK 特定字段保留。仅读取 error.message 会丢失响应体，产生 403 status code (no body) 或 Unknown: UnknownError 等不透明错误。normalizeProviderError 读取 Mistral、openai、@google/genai 与 AWS Bedrock 等已知 SDK 字段结构，返回用于组装显示字符串的结构。Anthropic 或 @google/genai 已将响应体合入消息时，通过 hasMessageBody 标记避免重复显示。
 
 const MAX_PROVIDER_ERROR_BODY_CHARS = 4000;
 
@@ -16,9 +16,9 @@ export interface NormalizedProviderError {
    */
   message: string;
   /**
-   * message 已包含响应体时为 true，无需另外追加。
+   * message 已包含响应体或未提取到响应体时为 true，无需另外追加。
    */
-  messageCarriesBody: boolean;
+  hasMessageBody: boolean;
 }
 
 type SdkErrorShape = Error & {
@@ -33,24 +33,24 @@ type SdkErrorShape = Error & {
 /**
  * 将提供方 SDK 抛出的错误规范化为包含状态码、响应体和消息的结构。
  * @param error - 捕获到的任意错误值。
- * @returns 规范化后的错误信息；非 `Error` 值仅包含其 JSON 序列化结果作为 `message`，`messageCarriesBody` 为 false。
- * @remarks 按 Mistral、`openai`、`@google/genai`、AWS Bedrock 的已知字段探测状态码与响应体；未提取到响应体或 `message` 已包含响应体时，`messageCarriesBody` 为 true。
+ * @returns 规范化后的错误信息；非 `Error` 值仅包含其 JSON 序列化结果作为 `message`，`hasMessageBody` 为 false。
+ * @remarks 按 Mistral、`openai`、`@google/genai`、AWS Bedrock 的已知字段探测状态码与响应体；未提取到响应体或 `message` 已包含响应体时，`hasMessageBody` 为 true。
  */
 export function normalizeProviderError(error: unknown): NormalizedProviderError {
   if (!(error instanceof Error)) {
-    return { message: safeJsonStringify(error), messageCarriesBody: false };
+    return { message: safeJsonStringify(error), hasMessageBody: false };
   }
 
   const sdkError = error as SdkErrorShape;
   const status = extractStatus(sdkError);
   const body = extractBody(sdkError);
-  const messageCarriesBody = body === undefined || error.message.includes(body);
+  const hasMessageBody = body === undefined || error.message.includes(body);
 
   return {
     status,
     body,
     message: error.message,
-    messageCarriesBody,
+    hasMessageBody,
   } satisfies NormalizedProviderError;
 }
 
@@ -140,7 +140,7 @@ function isReadableStreamLike(value: unknown): boolean {
  * @remarks
  * 只有普通对象才被视为 HTTP 响应体。SDK 错误字段可能保存类实例而非已解析的响应体，例如 AWS SDK v3 的 `$response.body`
  * 是 HTTP 流/响应包装对象，序列化后会得到 `{"_events":...}` 之类的噪声并替换掉真正有用的 `error.message`。
- * 类实例不产生响应体，`messageCarriesBody` 保持 true，从而保留真实消息。该检查与上方的 `pipe` 探测互补：
+ * 类实例不产生响应体，`hasMessageBody` 保持 true，从而保留真实消息。该检查与上方的 `pipe` 探测互补：
  * Web ReadableStream（只有 pipeTo/pipeThrough）及非流式 SDK 包装类无法通过原型检查，而已解析的 JSON 响应体仍可通过。
  */
 function isPlainNonEmptyObject(value: unknown): boolean {
@@ -164,7 +164,7 @@ function isPlainNonEmptyObject(value: unknown): boolean {
  * 其余情况展示状态码与响应体：无前缀为 `"<status>: <body>"`，有前缀为 `"<prefix> (<status>): <body>"`。
  */
 export function formatProviderError(norm: NormalizedProviderError, prefix?: string): string {
-  if (norm.messageCarriesBody || norm.status === undefined || norm.body === undefined) {
+  if (norm.hasMessageBody || norm.status === undefined || norm.body === undefined) {
     return prefix !== undefined && norm.status !== undefined
       ? `${prefix} (${norm.status}): ${norm.message}`
       : norm.message;

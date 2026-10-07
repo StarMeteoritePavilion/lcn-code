@@ -87,21 +87,21 @@ describe("getGrammarToolInput", (): void => {
 
 describe("appendGrammarToolInputJsonDelta", (): void => {
   it("增量拼接及转义后能解析回原输入", (): void => {
-    const buffer: GrammarToolInputJsonBuffer = { input: "", started: false, closed: false };
+    const buffer: GrammarToolInputJsonBuffer = { input: "", isStarted: false, isClosed: false };
     const first = appendGrammarToolInputJsonDelta(buffer, "input", '你"', false);
     const second = appendGrammarToolInputJsonDelta(buffer, "input", '你"\n好', true);
     const parsed: unknown = JSON.parse(`${first}${second}`);
     deepStrictEqual(parsed, { input: '你"\n好' });
-    strictEqual(buffer.closed, true);
+    strictEqual(buffer.isClosed, true);
   });
   it("空增量无需输出，空输入仍可闭合并幂等完成", (): void => {
-    const buffer: GrammarToolInputJsonBuffer = { input: "", started: false, closed: false };
+    const buffer: GrammarToolInputJsonBuffer = { input: "", isStarted: false, isClosed: false };
     strictEqual(appendGrammarToolInputJsonDelta(buffer, "input", "", false), undefined);
     strictEqual(appendGrammarToolInputJsonDelta(buffer, "input", "", true), '{"input":""}');
     strictEqual(appendGrammarToolInputJsonDelta(buffer, "input", "", true), undefined);
   });
   it("拒绝回退输入和闭合后继续改写", (): void => {
-    const buffer: GrammarToolInputJsonBuffer = { input: "hello", started: true, closed: false };
+    const buffer: GrammarToolInputJsonBuffer = { input: "hello", isStarted: true, isClosed: false };
     throws((): void => {
       appendGrammarToolInputJsonDelta(buffer, "input", "hell", false);
     }, /non-monotonically/);

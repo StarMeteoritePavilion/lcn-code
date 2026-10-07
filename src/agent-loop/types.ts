@@ -393,7 +393,7 @@ export interface AgentState {
    */
   get messages(): AgentMessage[];
 
-  /** 代理正在处理提示消息或继续运行时为 `true`。 */
+  /** 代理处理提示消息或继续运行时为 true，直到 agent_end 的异步监听器完成。 */
   readonly isStreaming: boolean;
   /** 当前流式响应中的部分助手消息；尚无部分消息时为 `undefined`。 */
   readonly streamingMessage?: AgentMessage;

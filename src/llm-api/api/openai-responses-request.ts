@@ -361,7 +361,7 @@ function convertResponsesMessages(
    * @remarks 会向外层 `messages` 追加条目；会话不锚定新增工具、无新增工具或端点两种能力均不支持时不追加。
    */
   const appendSystemToolAdditions = (message: SystemMessage, seed: string): void => {
-    const tools = transcriptTools.anchorsAdditions ? (message.toolsAdded ?? []) : [];
+    const tools = transcriptTools.isAnchoringAdditions ? (message.toolsAdded ?? []) : [];
     if (tools.length === 0) {
       return;
     }
